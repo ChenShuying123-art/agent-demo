@@ -24,3 +24,6 @@ data/index/*
 node_modules/
 web/dist/
 *.local
+
+# ---------- 个人学习材料：仅本地，不入库 ----------
+learning/
