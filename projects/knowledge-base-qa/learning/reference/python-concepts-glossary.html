@@ -1,0 +1,247 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>速查 · Python 概念术语表</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+<div class="wrap">
+
+  <p class="eyebrow">速查 · 跨课程复用</p>
+  <h1>Python 概念术语表</h1>
+  <p class="lede">本课程出现过的语法与工程概念，一条一句话。<span class="tag syntax">语法</span>属于 Python 语言本身，<span class="tag eng">工程</span>属于"大家都这么干"的惯例。新概念会陆续补进来。</p>
+
+  <h2>语法</h2>
+  <dl class="glossary">
+    <dt>模块（module）<span class="tag syntax">语法</span></dt>
+    <dd>一个 <code>.py</code> 文件就是一个模块，文件名（去掉后缀）即模块名。</dd>
+
+    <dt><code>from X import Y</code> / <code>import X</code><span class="tag syntax">语法</span></dt>
+    <dd>把别处定义的名字拿到当前文件来用。不 import 就用不了，这是"东西从哪来"的入口。</dd>
+
+    <dt>类型注解 <code>name: str</code><span class="tag syntax">语法</span></dt>
+    <dd>说明"这个值应该是什么类型"。运行时<strong>不检查</strong>，只服务人和工具（IDE、类型检查器）。</dd>
+
+    <dt>默认值 <code>x: int = 10</code><span class="tag syntax">语法</span></dt>
+    <dd>等号后是真正赋值；创建/调用时不给这个值就用它。</dd>
+
+    <dt>类 <code>class</code><span class="tag syntax">语法</span></dt>
+    <dd>把数据和行为打包成的自定义类型。</dd>
+
+    <dt>继承 <code>class A(B)</code><span class="tag syntax">语法</span></dt>
+    <dd>括号里是父类；A 白得 B 的全部能力，再补充自己的东西。</dd>
+
+    <dt>装饰器 <code>@xxx</code><span class="tag syntax">语法</span></dt>
+    <dd>贴在类/函数上、替它"加工"的东西。如 <code>@dataclass</code> 自动生成 <code>__init__</code>。</dd>
+
+    <dt>类属性<span class="tag syntax">语法</span></dt>
+    <dd>写在类里、缩进一级的变量，属于类本身而非某个实例。</dd>
+
+    <dt>函数 <code>def f(a, b=1) -&gt; None:</code><span class="tag syntax">语法</span></dt>
+    <dd><code>def</code> 定义函数；<code>b=1</code> 是参数默认值；<code>-&gt; None</code> 是返回类型。</dd>
+
+    <dt>联合类型 <code>str | None</code><span class="tag syntax">语法</span></dt>
+    <dd>读作"字符串或 None"，表示两种都可能。</dd>
+
+    <dt>关键字参数 <code>f(force=True)</code><span class="tag syntax">语法</span></dt>
+    <dd>按参数名传值，而不是按位置。</dd>
+
+    <dt>docstring<span class="tag syntax">语法</span></dt>
+    <dd>写在类/函数第一行的三引号字符串，供 IDE 与 <code>help()</code> 读取。</dd>
+
+    <dt><code>raise</code> / 异常<span class="tag syntax">语法</span></dt>
+    <dd>用 <code>raise</code> 主动抛出"这事做不下去了"的信号。<code>Exception("一句话")</code> 是最基本的异常，本质是个<strong>对象</strong>，可以往它身上挂任意字段。</dd>
+
+    <dt><code>try / except</code><span class="tag syntax">语法</span></dt>
+    <dd>接住异常。<code>try</code> 里放可能出错的代码，<code>except 某类型 as exc</code> 接住并处理；没人接就继续往上冒。</dd>
+
+    <dt>运算符重载<span class="tag syntax">语法</span></dt>
+    <dd>让自定义类型支持 <code>+ - * /</code> 等运算符，做法是实现对应的"双下划线方法"（如 <code>__truediv__</code>）。例：<code>Path("api") / "static"</code> 的 <code>/</code> 走的就是重载，结果是一条路径、不是数值。</dd>
+  </dl>
+
+  <h2>工程</h2>
+  <dl class="glossary">
+    <dt>包（package）<span class="tag eng">工程</span></dt>
+    <dd>一个文件夹 + 里面的 <code>__init__.py</code>，即可被 <code>import</code> 的包。</dd>
+
+    <dt><code>import 包</code> 的行为<span class="tag eng">工程</span></dt>
+    <dd>会<strong>执行一次该包的 <code>__init__.py</code></strong>。</dd>
+
+    <dt>环境变量<span class="tag eng">工程</span></dt>
+    <dd>活在操作系统里、程序外面的一组键值对，程序可读；用来放会随环境变化的值。</dd>
+
+    <dt><code>.env</code> 文件<span class="tag eng">工程</span></dt>
+    <dd>本地开发用的 <code>KEY=VALUE</code> 文件，模拟环境变量。<strong>绝不提交进 git</strong>，仓库只留 <code>.env.example</code>。</dd>
+
+    <dt>配置外置<span class="tag eng">工程</span></dt>
+    <dd>会随环境变化的东西（密钥、地址、模型名）放环境变量，不写进代码。见 <a href="https://12factor.net/zh_cn/config">12-Factor App（中文）</a>。</dd>
+
+    <dt>fail fast<span class="tag eng">工程</span></dt>
+    <dd>缺关键配置就立刻报错，别带着错配置继续跑。例：密钥字段不给默认值。</dd>
+
+    <dt>模块级单例<span class="tag eng">工程</span></dt>
+    <dd>在模块末尾创建一次全局对象（如 <code>settings = Settings()</code>），全项目共用，避免配置漂移。</dd>
+
+    <dt>logging<span class="tag eng">工程</span></dt>
+    <dd>标准库，按级别（DEBUG/INFO/WARNING/ERROR）输出信息；比 <code>print</code> 可过滤、可带时间与模块名。</dd>
+
+    <dt>依赖管理<span class="tag eng">工程</span></dt>
+    <dd>用 <code>requirements.txt</code> 记录项目所需的三方库；配合虚拟环境隔离，保证别人能装出一样的环境。</dd>
+
+    <dt>哈希 / sha256<span class="tag eng">工程</span></dt>
+    <dd>把任意长度的内容算成一段定长"指纹"，内容变一点指纹就完全不同。用于校验完整性、做唯一标识。</dd>
+
+    <dt>内容寻址<span class="tag eng">工程</span></dt>
+    <dd>用"内容算出的哈希"当唯一标识，而非文件名/时间。内容相同 → id 相同，天然去重。Git、Docker、网盘秒传都用它。</dd>
+
+    <dt>编码 / UTF-8<span class="tag eng">工程</span></dt>
+    <dd>文本在磁盘上是字节，需要"编码"规则才能读懂。读写文本要显式指定 <code>encoding="utf-8"</code>，否则会跟随系统默认（Windows 上不是 UTF-8，中文会乱码/报错）。</dd>
+
+    <dt>信任边界 / 外部输入不可信<span class="tag eng">工程</span></dt>
+    <dd>来自程序外部的东西（用户上传、网络请求）一律当作不可信，使用前必须校验/消毒。</dd>
+
+    <dt>路径穿越（path traversal）<span class="tag eng">工程</span></dt>
+    <dd>攻击者用 <code>../../</code> 之类的文件名让程序把文件写到预期之外的位置。防御：<code>Path(name).name</code> 拍平成纯文件名。</dd>
+
+    <dt>文件元数据 / stat<span class="tag eng">工程</span></dt>
+    <dd>文件的大小、修改时间等由文件系统记录的信息，通过 <code>path.stat()</code> 现取。以磁盘为准，不要凭记忆或参数。</dd>
+
+    <dt><code>Path</code>（pathlib）<span class="tag eng">工程</span></dt>
+    <dd>标准库里表示"路径"的类。<code>Path("data")</code> 语法上就是<strong>调用类造一个对象</strong>（和 <code>Settings()</code> 同理），不是特殊语法。好处：跨平台（自动用对分隔符），且把常用操作做成方法——<code>.</code>拼接、<code>.exists()</code>、<code>.is_dir()</code>、<code>.read_text()</code>、<code>.name</code>/<code>.suffix</code>、<code>.glob()</code>、<code>.unlink()</code>。注意 <code>Path("a") / "b"</code> 的 <code>/</code> 是运算符重载，不是除法。见 <code>config.py</code> / <code>loaders.py</code>。</dd>
+
+    <dt>正则表达式（regex）<span class="tag eng">工程</span></dt>
+    <dd>用一套符号描述"什么样的文本片段"。<code>^</code> 行首、<code>\n</code> 换行、<code>*</code> 零或多次。用于识别空行、标题行这类模式。</dd>
+
+    <dt>不变量（invariant）<span class="tag eng">工程</span></dt>
+    <dd>任何情况下都必须成立的断言，例如 <code>text[start:end] == chunk_text</code>。先想清楚"什么必须永远成立"，再写成检查去跑，比肉眼核对可靠。</dd>
+
+    <dt>断言 <code>assert</code><span class="tag syntax">语法</span></dt>
+    <dd>条件不成立就抛 <code>AssertionError</code>。用来把不变量变成可执行的检查，适合自测与调试。</dd>
+
+    <dt>向量 / embedding<span class="tag eng">工程</span></dt>
+    <dd>模型把一段文本映射成的一串定长数字。语义相近的文本，向量方向更接近。</dd>
+
+    <dt>分批（batching）<span class="tag eng">工程</span></dt>
+    <dd>受接口"单次条数上限"限制，把输入拆成多批依次发送。关键不在"发出去"，而在<strong>拼回来的顺序必须与输入一致</strong>——顺序错不会报错，只会让结果整体错位。</dd>
+
+    <dt>L2 归一化<span class="tag eng">工程</span></dt>
+    <dd>把向量长度缩放到 1。归一化后"点积 == 余弦相似度"，算起来更快。注意：百炼的 embedding 接口<strong>本就返回单位向量</strong>（L2 范数 = 1.0），再归一化是安全的空操作。</dd>
+
+    <dt>Top-N / argpartition<span class="tag eng">工程</span></dt>
+    <dd>只要最大的 N 个时不必整体排序：<code>argpartition</code> 用 O(N) 挑出候选，再对选中的 N 个排序（全排序是 O(N log N)）。代价是它不保证挑出的 N 个内部有序。</dd>
+
+    <dt>幂等（idempotent）<span class="tag eng">工程</span></dt>
+    <dd>同一操作执行一次和执行多次，结果相同。例：重新索引前先 <code>remove_document</code>，这样 Notebook 重复运行也不会累积重复 chunk。</dd>
+
+    <dt>终端编码陷阱<span class="tag eng">工程</span></dt>
+    <dd>用管道把含中文的脚本喂给 <code>python -</code> 时，管道会按控制台代码页编码，<strong>内容真的会损坏</strong>（不只是显示成 <code>?</code>）。规则：含非 ASCII 的脚本一律写成 <code>.py</code> 文件再运行。</dd>
+
+    <dt>Bi-encoder / Cross-encoder<span class="tag eng">工程</span></dt>
+    <dd>双塔：查询与文档各自独立编码，可预计算、快，但无交互（召回用）。交叉编码器：两者拼在一起过模型，有细粒度交互、准，但无法预计算（重排用）。</dd>
+
+    <dt>协议 <code>Protocol</code><span class="tag syntax">语法</span></dt>
+    <dd>只约定"有哪些方法、什么签名"，不规定怎么实现。业务代码只依赖协议，换实现时不用改调用方（配合工厂函数使用）。</dd>
+
+    <dt>工厂函数（factory）<span class="tag eng">工程</span></dt>
+    <dd>集中对象创建逻辑的函数（如 <code>get_llm(settings)</code>）。换实现只改工厂一处，其余代码不动。</dd>
+
+    <dt>适配器（adapter）<span class="tag eng">工程</span></dt>
+    <dd>把外部依赖的接口与异常"翻译"成自己项目约定的形状（如把 SDK 异常包成带 <code>code</code> 的 <code>LLMError</code>），让业务代码不被外部细节渗透。</dd>
+
+    <dt>思考模式（thinking mode）<span class="tag eng">工程</span></dt>
+    <dd>模型在回答前先输出一段推理过程。部分千问模型默认开启：更慢更贵，且正文可能落到 <code>reasoning_content</code> 导致 <code>content</code> 为空。RAG 场景须传 <code>enable_thinking=False</code> 关闭。</dd>
+
+    <dt>OpenAI 兼容协议<span class="tag eng">工程</span></dt>
+    <dd>OpenAI 的 <code>chat/completions</code> 接口成了事实标准，其他厂商模仿它的 URL 路径、请求字段、响应结构与错误格式。好处：换厂商只改 <code>base_url</code> + <code>model</code>。注意它与 <code>typing.Protocol</code> 不是一回事——一个是网络接口约定，一个是代码内部形状约定。</dd>
+
+    <dt>extra_body<span class="tag eng">工程</span></dt>
+    <dd>OpenAI SDK 留的逃生口：把"兼容协议未覆盖的厂商私有参数"（如 <code>enable_thinking</code>）原样塞进请求体。放在这里的东西，正是"兼容"没覆盖到的地方。</dd>
+
+    <dt>单一事实来源（single source of truth）<span class="tag eng">工程</span></dt>
+    <dd>某份文档 / 文件是唯一的权威版本。例：提示词正文以 spec §12.3 为准，代码必须与它逐字一致，要改先改文档。任何"两处各存一份"的做法迟早会不一致。</dd>
+
+    <dt>控制变量法（control variable）<span class="tag eng">工程</span></dt>
+    <dd>评测时只让一个因素变化、其余全部固定。本项目用"共享硬约束 + 风格段"的<strong>代码结构</strong>实现：硬约束是同一份字符串，所以三版差异只可能来自风格段。</dd>
+
+    <dt>编排（orchestration）<span class="tag eng">工程</span></dt>
+    <dd>把若干子能力按顺序串成链路，自身不实现具体逻辑（不做 IO、不调模型）。好处：每一环都能单独替换，也能单独观察（见 <code>RAGPipeline</code>）。</dd>
+
+    <dt>依赖注入（dependency injection）<span class="tag eng">工程</span></dt>
+    <dd>不自己在内部 new 依赖，而是由调用方从构造函数传进来。<code>RAGPipeline</code> 接住 store / embedder / reranker / llm 四个组件，所以测试和消融实验都能塞替身或换配置。</dd>
+
+    <dt>幻觉引用（hallucinated citation）<span class="tag eng">工程</span></dt>
+    <dd>答案里标了不存在的引用编号（如只给了 4 条资料却标 <code>[7]</code>）。处理原则：忽略 + 告警——不因小瑕疵毁掉整个回答，也不让它无声无息地溜过去，留待评测统计"幻觉引用率"。</dd>
+
+    <dt>控制反转（IoC）<span class="tag eng">工程</span></dt>
+    <dd>把"用哪个实现"的决定权从模块内部挪到调用方。实现手段就是依赖注入：自己不 <code>new</code>，由外部把组件传进来。</dd>
+
+    <dt>自己 new <span class="tag eng">工程</span></dt>
+    <dd>在代码里直接写构造函数调用造对象（如 <code>DashScopeChat(settings)</code>）。"new" 是 Java 的说法，Python 里对应构造函数调用。相对的写法是"依赖注入"。</dd>
+
+    <dt>路由（route）<span class="tag eng">工程</span></dt>
+    <dd>把"某个 URL + 某个 HTTP 方法"绑到一个函数上。FastAPI 里用 <code>@router.get("/health")</code> 这类装饰器登记；请求进来时框架查表、找到函数、调用它。</dd>
+
+    <dt>HTTP 状态码<span class="tag eng">工程</span></dt>
+    <dd>用一个数字表达结果：2xx 成功；4xx 是"你的错"（400 参数非法、404 找不到、422 格式不合规）；5xx 是"我这边的错"（502 上游失败）。分清楚才知道该改请求还是查上游。</dd>
+
+    <dt>请求 / 响应模型（schema）<span class="tag eng">工程</span></dt>
+    <dd>接口对外的输入输出结构（本项目用 pydantic 的 <code>BaseModel</code>）。一身两职：校验请求（漏字段直接 422，函数体不执行）+ 自动生成 <code>/docs</code> 接口文档。</dd>
+
+    <dt>错误信封<span class="tag eng">工程</span></dt>
+    <dd>让所有错误长得一样的固定结构，本项目为 <code>{"error":{"code","message"}}</code>。前端只写一套错误处理；上游的原始 code 原样透传，便于一眼定位 key/额度/地域问题。</dd>
+
+    <dt>上游 / 下游<span class="tag eng">工程</span></dt>
+    <dd>一次调用里被依赖的一方叫上游（如百炼模型），发起方叫下游。上游失败一般回 502，而不是 400——因为错不在调用方。</dd>
+
+    <dt>应用级单例（app.state）<span class="tag eng">工程</span></dt>
+    <dd>有状态的对象（向量库、pipeline）在启动时造一次、挂在 <code>app.state</code> 上供各路由共用。比模块级全局变量更好测试、更好替换；注意共享同一实例，否则会出现"索引了却删不掉"的不一致。</dd>
+
+    <dt>异常冒泡 / 调用栈<span class="tag eng">工程</span></dt>
+    <dd>异常沿"谁调用了谁"的链条一层层往上抛，直到被 <code>except</code> 或框架顶层接住。好处：抛出点的中间函数完全不用管，错误自动抵达能处理它的地方。</dd>
+
+    <dt>自定义异常<span class="tag eng">工程</span></dt>
+    <dd>继承 <code>Exception</code>、往对象上挂额外字段（如本项目 <code>ApiError</code> 的 <code>status_code</code> / <code>code</code>）。意义是让"错误"从一句话变成<strong>有结构的数据</strong>。别滥用：只有"信息量不够"或"需要被单独翻译"时才新建。</dd>
+
+    <dt>异常处理器（exception_handler）<span class="tag eng">工程</span></dt>
+    <dd>用 <code>@app.exception_handler(某异常类型)</code> 登记"异常类型 → 处理函数"的对照表（和路由表登记"URL → 函数"同理）。异常冒泡到顶层时框架按类型<strong>就近匹配</strong>（更具体的子类优先），未匹配的由 <code>Exception</code> 兜底。见课程 0015。</dd>
+
+    <dt>关注点分离（separation of concerns）<span class="tag eng">工程</span></dt>
+    <dd>让每一层只关心自己那件事：核心库只管抛 <code>ValueError</code>，不必知道 HTTP；接口层只管把异常翻译成响应。表现就是"删掉框架，核心库依然完整"。</dd>
+
+    <dt>入口文件（entry point）<span class="tag eng">工程</span></dt>
+    <dd>服务启动时第一个被加载的模块，负责把零件装配成应用并暴露一个约定的对象（uvicorn 找 <code>api.main</code> 里名叫 <code>app</code> 的变量）。见课程 0016。</dd>
+
+    <dt>import 缓存 / 模块只执行一次<span class="tag eng">工程</span></dt>
+    <dd>模块首次被 import 时执行其顶层语句，之后存进缓存（<code>sys.modules</code>），再 import 直接取缓存、不再重跑。所以写在模块最外层的 <code>app = create_app()</code> 天然只有一份（模块级单例）。</dd>
+
+    <dt>副作用（side effect）<span class="tag eng">工程</span></dt>
+    <dd>一次操作除返回值外，还对外部世界产生了影响（如 import 时就真的加载了索引）。<code>import api.main</code> 是有副作用的——这既是"启动即报错（fail fast）"的手段，也提醒你别随手 import。</dd>
+
+    <dt>静态资源 / 静态文件<span class="tag eng">工程</span></dt>
+    <dd>现成、每次内容都一样的文件（HTML / CSS / JS / 图片），不需要后端计算；相对的"动态接口"会随请求参数或数据变化。前端 <code>npm run build</code> 后产物就是静态文件。</dd>
+
+    <dt>挂载（mount）<span class="tag eng">工程</span></dt>
+    <dd>在某条 URL 前缀上接一个独立的处理程序，该前缀下的请求全交给它（如 <code>app.mount("/", StaticFiles("web/dist", html=True))</code>）。是"一整片区域"，不同于路由的"精确匹配一条 URL"。</dd>
+
+    <dt>分层架构 / 薄层<span class="tag eng">工程</span></dt>
+    <dd>每层只做一类事，层与层靠明确接口沟通。<strong>判断标准：删掉某一层，其它层还能独立跑</strong>——删掉 FastAPI，<code>kbqa/</code> 依然完整；删掉 Vue，<code>api/</code> 依然能用 curl 调。好处是把"变化"关在一个盒子里。见课程 0017。</dd>
+
+    <dt>可观测性（observability）<span class="tag eng">工程</span></dt>
+    <dd>让系统内部状态"看得见"：主流程按 §18.2 打日志、把中间产物分阶段暴露（召回 20 与重排 4 分开返回）、前端把过程画出来（「召回 → 重排」面板）。目的：出问题能定位，而不是靠猜。</dd>
+
+    <dt>消融实验（ablation）<span class="tag eng">工程</span></dt>
+    <dd>把某个组件关掉再跑一遍，看指标差多少，据此判断它是否真的有用（本项目做法：固定提示词，只开关 Rerank）。前提是<strong>其它变量全部固定</strong>，否则分不清是谁的功劳。</dd>
+
+    <dt>LLM-as-judge（模型当裁判）<span class="tag eng">工程</span></dt>
+    <dd>用大模型给回答打分（对照 <code>expected_points</code>），替代人工评测。风险是"裁判也会错"：所以要记录逐题理由、统计 JSON 解析失败率，并由<strong>已知答案的出题人</strong>来校准（这就是 T12 必须人工出题的原因）。</dd>
+  </dl>
+
+  <div class="foot">
+    回 <a href="../lessons/0002-reading-t0-code.html">前置课 0002</a> · <a href="../lessons/0001-how-to-write-t0.html">课程 0001</a> · <a href="../lessons/0003-how-to-write-t1.html">课程 0003</a> · <a href="../lessons/0004-how-to-write-t2.html">课程 0004</a> · <a href="../lessons/0005-how-to-write-t3.html">课程 0005</a> · <a href="../lessons/0006-how-to-write-t4.html">课程 0006</a> · <a href="../lessons/0007-how-to-write-t5.html">课程 0007</a> · <a href="../lessons/0008-how-to-write-t6.html">课程 0008</a> · <a href="../lessons/0009-protocol-factory-adapter.html">课程 0009</a> · <a href="../lessons/0010-how-to-write-t7.html">课程 0010</a> · <a href="../lessons/0011-how-to-write-t8.html">课程 0011</a> · <a href="../lessons/0012-how-to-write-t9.html">课程 0012</a> · <a href="../lessons/0013-dependency-injection.html">课程 0013</a> · <a href="../lessons/0014-how-to-write-t10.html">课程 0014</a> · <a href="../lessons/0015-exception-handler.html">课程 0015</a> · <a href="../lessons/0016-app-assembly.html">课程 0016</a> · <a href="../lessons/0017-fullstack-agent-map.html">课程 0017</a>
+  </div>
+
+</div>
+</body>
+</html>

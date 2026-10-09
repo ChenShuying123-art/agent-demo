@@ -1,0 +1,324 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>手册 · FastAPI 用法（对着本项目代码学）</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+<div class="wrap">
+
+  <p class="eyebrow">手册 · 配合课程 0014 · 对照 api/ 目录</p>
+  <h1>FastAPI 用法手册</h1>
+  <p class="lede">这份手册只讲一件事：<strong>FastAPI 怎么写</strong>。所有例子都来自本项目的 <code>api/</code> 三个文件（<code>main.py</code> / <code>routes.py</code> / <code>schemas.py</code>），看的时候开着它们对照，边读边点 <code>/docs</code> 看效果。</p>
+
+  <div class="win">
+    <strong>学完你能做到：</strong>独立写出一个"能解析参数、能校验、能返回固定结构、出错有统一格式、还自带文档页"的小接口。不需要背 API，<strong>记住"这块语法解决什么问题、去哪个文件里找例子"就够了。</strong>
+    <br><span class="muted">配套：<a href="../lessons/0014-how-to-write-t10.html">课程 0014</a> · <a href="python-concepts-glossary.html">术语表</a> · <a href="https://fastapi.tiangolo.com/zh/tutorial/first-steps/">FastAPI 官方教程（中文）</a></span>
+  </div>
+
+  <h2>零、FastAPI 到底替你做了什么</h2>
+  <p>不用框架时，你要自己写：解析 URL、读 JSON、校验字段、拼 HTTP 状态码、把对象转 JSON……<strong>这些"重复的脏活"FastAPI 全包了</strong>，你只要写普通的 Python 函数。具体是四件事：</p>
+  <table>
+    <thead><tr><th>它做的</th><th>你只要写</th><th>本项目在哪看到</th></tr></thead>
+    <tbody>
+      <tr><td>把 URL 映射到函数（路由）</td><td>贴一个装饰器</td><td><code>@router.get("/health")</code></td></tr>
+      <tr><td>解析并校验参数</td><td>写类型注解 + pydantic 模型</td><td><code>qa(payload: QARequest)</code></td></tr>
+      <tr><td>对象 ⇄ JSON 自动转换</td><td>直接 <code>return</code> 对象</td><td><code>return to_document_out(doc)</code></td></tr>
+      <tr><td>生成接口文档页</td><td>什么都不用做</td><td>启动后访问 <code>/docs</code></td></tr>
+    </tbody>
+  </table>
+  <p class="muted">心法：<strong>你写 Python，它管 HTTP。</strong>凡是在写"怎么解析请求/怎么拼响应"的代码，多半是没用好框架。</p>
+
+  <h2>一、最小可运行应用</h2>
+  <p>一个能跑的 FastAPI 应用，最短只要三行：</p>
+  <pre><code>from fastapi import FastAPI
+
+app = FastAPI()                    # 1. 造一个"应用"对象
+
+@app.get("/hello")                 # 2. 把下面的函数"挂"到 GET /hello 上
+def hello():
+    return {"msg": "hi"}           # 3. 返回 dict，框架自动转成 JSON</code></pre>
+  <p>再配一条启动命令（<code>main</code> 是文件名，<code>app</code> 是里面那个变量名）：</p>
+  <pre><code>python -m uvicorn main:app --reload
+#               └──┬──┘ └┬┘  └── 改了代码自动重启（开发时用）
+#              文件名.py  变量名</code></pre>
+  <p>访问 <code>http://127.0.0.1:8000/hello</code> 就能看到 <code>{"msg":"hi"}</code>。</p>
+
+  <div class="note">
+    <span class="label">对照本项目：为什么是 app = create_app()</span>
+    <code>api/main.py</code> 最后一行是 <code>app = create_app()</code>，而不是直接 <code>app = FastAPI()</code>。
+    多包一层函数，是为了<strong>在造应用的同时把依赖装好</strong>（加载向量库、组装 pipeline、挂异常处理、注册路由）。
+    uvicorn 找的是变量 <code>app</code>——只要是 FastAPI 实例就行，怎么来的它不管。
+  </div>
+
+  <h2>二、路由：APIRouter 与装饰器</h2>
+  <p>小项目可以直接 <code>@app.get(...)</code>。但路由一多，全堆在一个文件里会很乱，于是用 <code>APIRouter</code> <strong>把一组路由打包</strong>，最后再合并进 app：</p>
+  <pre><code># api/routes.py —— 定义一组路由
+router = APIRouter(prefix="/api", tags=["kbqa"])   # 统一前缀 /api，文档里归为一组
+
+@router.get("/health", response_model=HealthResponse)
+def health(request: Request) -&gt; HealthResponse: ...
+
+@router.post("/documents", response_model=DocumentOut)
+async def upload_document(request: Request, file: UploadFile = File(...)): ...
+
+@router.delete("/documents/{doc_id}", response_model=DeleteResponse)
+def delete_document(doc_id: str, request: Request): ...</code></pre>
+  <pre><code># api/main.py —— 把整组路由合并进来
+app.include_router(router)</code></pre>
+  <p>三件事要分清：</p>
+  <ul>
+    <li><strong>装饰器</strong>（<code>@router.get(...)</code>）：把函数登记进"URL → 函数"的对照表。它长得像课程 0001 里的 <code>@dataclass</code>，都是"替你加工"。</li>
+    <li><strong>方法名</strong>（<code>get</code> / <code>post</code> / <code>delete</code>）：对应 HTTP 方法，同一个路径可以用不同方法挂不同函数。</li>
+    <li><strong><code>prefix</code></strong>：给这一组路由统一加前缀。所以 <code>@router.get("/health")</code> 真正的地址是 <code>/api/health</code>。</li>
+  </ul>
+
+  <h2>三、参数从哪来（最该记住的一张表）</h2>
+  <p>FastAPI 靠<strong>函数参数</strong>判断"这个值要从请求的哪儿取"。规则如下，建议背下来：</p>
+  <table>
+    <thead><tr><th>参数写法</th><th>框架去哪取</th><th>本项目例子</th></tr></thead>
+    <tbody>
+      <tr><td>名字和路径里的 <code>{}</code> 一致</td><td><strong>路径参数</strong></td><td><code>def delete_document(doc_id: str, ...)</code> ← <code>/{doc_id}</code></td></tr>
+      <tr><td>类型是 <code>BaseModel</code> 的子类</td><td><strong>请求体</strong>（JSON）</td><td><code>payload: QARequest</code></td></tr>
+      <tr><td><code>file: UploadFile = File(...)</code></td><td><strong>上传的文件</strong>（multipart）</td><td><code>upload_document</code></td></tr>
+      <tr><td>类型是 <code>Request</code></td><td>整个请求对象（要啥自己取）</td><td><code>request: Request</code></td></tr>
+      <tr><td>普通标量、且不在路径里</td><td>查询参数（<code>?x=1</code>）</td><td>本项目未用</td></tr>
+    </tbody>
+  </table>
+  <p class="muted">这张表是本手册的核心。看懂它，你就能看懂任何 FastAPI 路由的签名——每个参数都能在大脑里还原成"它是从请求的哪里来的"。</p>
+
+  <h3>路径参数：名字必须和 {} 一模一样</h3>
+  <pre><code>@router.delete("/documents/{doc_id}")
+def delete_document(doc_id: str, request: Request) -&gt; DeleteResponse:
+    docs = {d.doc_id: d for d in loaders.list_documents(...)}
+    doc = docs.get(doc_id)                 # ← 直接用，框架已经帮你取好并转成 str
+    if doc is None:
+        raise ApiError(404, "document_not_found", f"文档不存在：{doc_id}")</code></pre>
+  <p>类型注解 <code>str</code> 不是装饰：写 <code>doc_id: int</code>，框架会<strong>自动把 URL 里的 <code>"123"</code> 转成数字 <code>123</code></strong>；转不动就返回 422。<code>Request</code> 类型的参数不参与"取参"，它只是让你能拿到请求对象本身（见第七节）。</p>
+
+  <h2>四、请求体与校验：pydantic BaseModel</h2>
+  <p>POST 的 JSON body，用一个继承 <code>BaseModel</code> 的类来描述：</p>
+  <pre><code># api/schemas.py
+from pydantic import BaseModel, Field
+
+class QARequest(BaseModel):
+    question: str
+    style: str | None = None          # 可省略 → 默认 None
+    doc_ids: list[str] | None = None
+    use_rerank: bool | None = None
+
+class IndexRequest(BaseModel):
+    doc_ids: list[str] = Field(min_length=1)   # 额外约束：至少要有一个元素</code></pre>
+  <p>写完之后，<strong>校验是免费的</strong>——框架在调用你的函数之前先对照这个类检查：</p>
+  <table>
+    <thead><tr><th>客户端发来的</th><th>结果</th></tr></thead>
+    <tbody>
+      <tr><td><code>{}</code>（漏了必填的 question）</td><td>422，函数体<strong>根本不执行</strong></td></tr>
+      <tr><td><code>{"doc_ids": []}</code></td><td>422（违反 <code>min_length=1</code>）</td></tr>
+      <tr><td><code>{"question": "..."}</code></td><td>通过，拿到 <code>payload.question</code></td></tr>
+    </tbody>
+  </table>
+  <div class="note">
+    <span class="label">关键：校验发生在函数被调用之前</span>
+      这是你第一次能看到"<strong>框架夹在中间</strong>"的地方。类型注解在这里从"给人和工具看的注释"变成了<strong>真正会执行的检查</strong>——这也是课程 0001 里说"注解运行时不被强制"的一个例外：<strong>框架主动读了它</strong>。
+  </div>
+
+  <h2>五、响应：response_model 与返回值</h2>
+  <p>给路由加 <code>response_model=...</code>，相当于声明"这个接口保证吐出长这样的 JSON"：</p>
+  <pre><code>@router.get("/documents", response_model=list[DocumentOut])
+def list_documents(request: Request) -&gt; list[DocumentOut]:
+    return [to_document_out(doc) for doc in loaders.list_documents(...)]</code></pre>
+  <p>它的作用有两个：</p>
+  <ul>
+    <li><strong>序列化</strong>：返回值只保留模型里声明过的字段，并转成 JSON（<code>datetime</code> → ISO 字符串、<code>Path</code> 早已在转换函数里变成 <code>str</code>）；</li>
+    <li><strong>文档</strong>：<code>/docs</code> 上这个接口的"响应示例"就来自它。</li>
+  </ul>
+  <div class="note">
+    <span class="label">为什么本项目不直接 return 内部的 dataclass</span>
+    内部 <code>Document</code> 有 <code>path: Path</code>（JSON 里没有"路径对象"），字段名也可能和对外约定不同（pipeline 用 <code>elapsed_ms</code>，对外要 <code>ms</code>）。所以先用 <code>to_xxx_out()</code> 把内部对象翻译成对外模型，再返回。
+    <br><strong>规矩：返回值必须是 response_model 声明的那种模型实例</strong>（或它能校验通过的东西）。类型对不上，FastAPI 会在返回时报错——这其实是在帮你抓 bug。
+  </div>
+  <p>状态码默认 200。想改成别的（例如新建返回 201）可以写 <code>@router.post("/documents", status_code=201)</code>。本项目没改，因为"上传命中去重"时返回的是已有记录，201 反而会误导。</p>
+
+  <h2>六、async def 还是 def？（本项目的选择）</h2>
+  <p>FastAPI 两种都支持，但行为不同：</p>
+  <table>
+    <thead><tr><th>写法</th><th>框架怎么跑</th><th>适合</th></tr></thead>
+    <tbody>
+      <tr><td><code>def</code>（普通函数）</td><td>丢进线程池跑，不卡住主循环</td><td>同步的耗时操作，如调 pipeline</td></tr>
+      <tr><td><code>async def</code></td><td>直接在事件循环里跑</td><td>需要 <code>await</code> 的异步操作，如读上传文件</td></tr>
+    </tbody>
+  </table>
+  <pre><code># api/routes.py —— 需要 await 读文件，所以是 async
+@router.post("/documents", response_model=DocumentOut)
+async def upload_document(request: Request, file: UploadFile = File(...)) -&gt; DocumentOut:
+    content = await file.read()      # ← 只有 async 函数里才能 await
+    doc = loaders.save_upload(file.filename or "unnamed.txt", content, ...)
+    return to_document_out(doc)
+
+# 其余路由都是普通 def —— 它们内部是同步调用（pipeline 会真的去调模型）
+@router.post("/qa", response_model=QAResultOut)
+def qa(payload: QARequest, request: Request) -&gt; QAResultOut:
+    ...</code></pre>
+  <div class="note">
+    <span class="label">一句话原则</span>
+    <strong>不要在 <code>async def</code> 里做同步的慢操作</strong>（比如直接 <code>requests.get</code> 或调模型），那会把整个事件循环堵死，其他请求全部排队。
+    本项目除了"上传读文件"必须 async，其余一律用普通 <code>def</code>——让框架把它们丢进线程池，反而更安全。
+  </div>
+
+  <h2>七、拿共享对象：Request 与 app.state</h2>
+  <p>路由有时候需要"应用启动时就造好的东西"，比如 pipeline。做法是：<strong>启动时挂到 <code>app.state</code>，请求时通过 <code>request.app.state</code> 取</strong>。</p>
+  <pre><code># api/main.py —— 装配时挂上去（只做一次）
+app.state.settings = settings
+app.state.store = store
+app.state.pipeline = pipeline
+
+# api/routes.py —— 请求时取出来用
+def _pipeline(request: Request) -&gt; RAGPipeline:
+    return request.app.state.pipeline
+
+@router.post("/qa", response_model=QAResultOut)
+def qa(payload: QARequest, request: Request) -&gt; QAResultOut:
+    result = _pipeline(request).answer(payload.question, style, payload.doc_ids, ...)
+    return to_qa_out(result)</code></pre>
+  <div class="note">
+    <span class="label">顺带认识一下 Depends（本项目没用，但你会到处看到）</span>
+    FastAPI 官方还有一套依赖注入语法 <code>Depends</code>，写法是 <code>def qa(pipeline: RAGPipeline = Depends(get_pipeline))</code>，靠框架自动注入。
+    本项目选了更直白的 <code>request.app.state</code>：一个 <code>_pipeline(request)</code> 助手函数，读起来没有"魔法"，也不需要额外记一套机制。
+    <strong>两种都对</strong>；看懂别人的代码时知道 <code>Depends</code> 是干嘛的就行。
+  </div>
+
+  <h2>八、报错：三种写法，本项目选了哪一种</h2>
+  <table>
+    <thead><tr><th>写法</th><th>怎么用</th><th>特点</th></tr></thead>
+    <tbody>
+      <tr><td>直接 <code>return JSONResponse(...)</code></td><td>自己拼响应</td><td>灵活，但会绕过 response_model，错误形状容易散落各处</td></tr>
+      <tr><td>抛 <code>HTTPException(404, "…")</code></td><td>FastAPI 自带</td><td>简单；但它默认返回 <code>{"detail": ...}</code>，形状不统一</td></tr>
+      <tr><td>自定义异常 + <code>@app.exception_handler</code></td><td>本项目做法</td><td>路由只管"抛"，形状统一由一处翻译</td></tr>
+    </tbody>
+  </table>
+  <pre><code># 1) 定义自己的异常（routes.py）
+class ApiError(Exception):
+    def __init__(self, status_code: int, code: str, message: str): ...
+
+# 2) 路由里直接抛
+raise ApiError(404, "document_not_found", f"文档不存在：{doc_id}")
+
+# 3) 集中注册处理器，翻译成统一信封
+@app.exception_handler(ApiError)
+async def _handle_api_error(request: Request, exc: ApiError):
+    return JSONResponse(status_code=exc.status_code,
+                        content={"error": {"code": exc.code, "message": exc.message}})</code></pre>
+  <p>加了处理器之后，<strong>任何</strong>没被单独处理的异常也能兜住，保证前端永远拿到同一个形状：</p>
+  <table>
+    <thead><tr><th>抛出的异常</th><th>最终响应</th></tr></thead>
+    <tbody>
+      <tr><td><code>ValueError</code></td><td><code>400 {"error":{"code":"invalid_request",...}}</code></td></tr>
+      <tr><td><code>ApiError(404, ...)</code></td><td><code>404 {"error":{"code":"document_not_found",...}}</code></td></tr>
+      <tr><td>请求体校验失败</td><td><code>422 {"error":{"code":"validation_error",...}}</code></td></tr>
+      <tr><td>上游模型报错</td><td><code>502</code>，code 用百炼原始的（如 <code>invalid_api_key</code>）</td></tr>
+    </tbody>
+  </table>
+  <p class="muted">处理器写在 <code>install_exception_handlers(app)</code> 里，由 <code>create_app()</code> 调用一次。<strong>错误约定只写一次</strong>——这就是"统一信封"的实现方式。</p>
+
+  <div class="note">
+    <span class="label">这块想细看 → 专门一课</span>
+    "异常是什么、为什么自定义、<code>@app.exception_handler</code> 怎么接住它"，已单独讲透：
+    <a href="../lessons/0015-exception-handler.html">课程 0015 · 自定义异常与异常处理器</a>。
+  </div>
+
+  <h2>九、上传文件：UploadFile</h2>
+  <pre><code>from fastapi import File, UploadFile
+
+@router.post("/documents", response_model=DocumentOut)
+async def upload_document(request: Request, file: UploadFile = File(...)):
+    content = await file.read()            # 读成 bytes
+    doc = loaders.save_upload(file.filename or "unnamed.txt", content, settings.data_dir)
+    return to_document_out(doc)</code></pre>
+  <ul>
+    <li><code>File(...)</code> 里的 <code>...</code> 读作"必填"。写成 <code>File(None)</code> 就变成可选。</li>
+    <li><code>file.filename</code> 是客户端传来的原始文件名——<strong>属于外部输入，不可信</strong>（课程 0003 的路径穿越讲的就是它）。</li>
+    <li>依赖 <code>python-multipart</code>：处理 multipart 表单需要它，否则启动报错。已在 <code>requirements.txt</code> 里。</li>
+  </ul>
+
+  <h2>十、白拿的文档页：/docs</h2>
+  <p>启动后打开 <code>http://127.0.0.1:8000/docs</code>，你会看到一个可交互的接口列表——<strong>它是根据你的路由、类型注解、pydantic 模型自动生成的</strong>，一行额外代码都不用写。</p>
+  <table>
+    <thead><tr><th>地址</th><th>内容</th></tr></thead>
+    <tbody>
+      <tr><td><code>/docs</code></td><td>可点的接口文档（Swagger UI），能直接 "Try it out" 调接口</td></tr>
+      <tr><td><code>/openapi.json</code></td><td>机器可读的接口描述，<code>/docs</code> 就是用它渲染的</td></tr>
+      <tr><td><code>/redoc</code></td><td>另一种风格的文档页</td></tr>
+    </tbody>
+  </table>
+  <p class="muted">所以"路由数量对不对"有个极快的检查法：数 <code>/openapi.json</code> 里的 <code>paths</code>。<strong>文档即契约</strong>——你写的类型注解有多准，文档就有多准。</p>
+
+  <h2>十一、托管静态文件：StaticFiles 与挂载顺序</h2>
+  <p>把前端构建产物（<code>web/dist</code>）交给 FastAPI 一起托管：</p>
+  <pre><code>from fastapi.staticfiles import StaticFiles
+from pathlib import Path
+
+_WEB_DIST = Path("web") / "dist"
+
+app.include_router(router)                 # ← 先注册 /api/* 路由
+if _WEB_DIST.is_dir():                     # ← 目录不存在就跳过（前端还没构建时不报错）
+    app.mount("/", StaticFiles(directory=_WEB_DIST, html=True), name="web")</code></pre>
+  <ul>
+    <li><code>html=True</code>：访问目录时自动返回 <code>index.html</code>，适合单页应用。</li>
+    <li><strong>顺序是坑</strong>：<code>mount("/")</code> 会兜住所有没被前面匹配的路径。若放在 <code>include_router</code> 之前，<code>/api/health</code> 会被当成"静态目录里找 api 文件夹"→ 404。<strong>先具体、后兜底。</strong></li>
+  </ul>
+
+  <h2>十二、本地测接口：TestClient</h2>
+  <p>不想开浏览器时，可以用 <code>TestClient</code> 在 Python 里模拟请求（本项目自测就用它）：</p>
+  <pre><code>from fastapi.testclient import TestClient
+from api.main import app
+
+client = TestClient(app)
+r = client.get("/api/health")
+print(r.status_code, r.json())      # 200 {'status': 'ok', ...}
+
+r = client.post("/api/index", json={"doc_ids": ["deadbeef"]})
+print(r.status_code, r.json())      # 400 {'error': {'code': 'invalid_request', ...}}
+
+r = client.post("/api/documents", files={"file": ("a.md", b"hello", "text/markdown")})
+print(r.status_code)                # 上传用 files= 而不是 json=</code></pre>
+  <p class="muted">它底层真的会走一遍路由（校验、异常处理、序列化都生效），只是不经过网络。<strong>写完接口先写几行 TestClient 把错误路径跑绿，再连真实服务。</strong></p>
+
+  <h2>十三、常见坑清单（都来自本项目注释）</h2>
+  <ul>
+    <li><strong>启动命令写错</strong>：是 <code>模块路径:变量名</code>（<code>api.main:app</code>），不是文件路径。</li>
+    <li><strong>路径参数名字对不上</strong>：<code>/{doc_id}</code> 配 <code>def f(doc_id)</code>，错一个字母就变成"普通查询参数"或直接报错。</li>
+    <li><strong>返回类型与 response_model 不符</strong>：返回了 dataclass/dict 却不是声明的模型，框架会报校验错。</li>
+    <li><strong>异步里做同步慢操作</strong>：在 <code>async def</code> 里调阻塞接口，会拖垮整个服务。</li>
+    <li><strong><code>mount("/")</code> 放错位置</strong>：抢走 API 路由，全部 404。</li>
+    <li><strong>忘了 <code>python-multipart</code></strong>：一用 <code>UploadFile</code> 就启动失败。</li>
+    <li><strong>把业务塞进路由</strong>：路由应该只有"解析 → 委托 → 翻译"，否则 Notebook 和 API 会各持一份逻辑。</li>
+  </ul>
+
+  <h2>十四、一页速查</h2>
+  <table>
+    <thead><tr><th>我想做…</th><th>写什么</th></tr></thead>
+    <tbody>
+      <tr><td>建一组路由</td><td><code>router = APIRouter(prefix="/api", tags=["kbqa"])</code></td></tr>
+      <tr><td>挂一个 GET/POST/DELETE</td><td><code>@router.get("/x")</code> / <code>@router.post("/x")</code> / <code>@router.delete("/x")</code></td></tr>
+      <tr><td>URL 里带变量</td><td>路径写 <code>"/x/{id}"</code>，参数写 <code>id: str</code></td></tr>
+      <tr><td>接收 JSON 请求体</td><td>参数写成某个 <code>BaseModel</code> 子类</td></tr>
+      <tr><td>接收上传文件</td><td><code>file: UploadFile = File(...)</code> + <code>async def</code> + <code>await file.read()</code></td></tr>
+      <tr><td>固定响应结构</td><td><code>@router.get("/x", response_model=FooOut)</code></td></tr>
+      <tr><td>拿到应用共享对象</td><td>参数加 <code>request: Request</code>，用 <code>request.app.state.xxx</code></td></tr>
+      <tr><td>报一个业务错误</td><td><code>raise 自定义异常</code>，配合 <code>@app.exception_handler</code></td></tr>
+      <tr><td>合并路由到应用</td><td><code>app.include_router(router)</code></td></tr>
+      <tr><td>托管前端静态文件</td><td><code>app.mount("/", StaticFiles(directory="web/dist", html=True))</code>（放最后）</td></tr>
+      <tr><td>启动开发服务器</td><td><code>python -m uvicorn api.main:app --reload</code></td></tr>
+    </tbody>
+  </table>
+
+  <div class="foot">
+    回 <a href="../lessons/0014-how-to-write-t10.html">课程 0014</a> · <a href="python-concepts-glossary.html">术语表</a> · <a href="../RESOURCES.md">RESOURCES.md</a> · <a href="https://fastapi.tiangolo.com/zh/tutorial/first-steps/">FastAPI 官方教程 · 第一步（中文）</a>
+  </div>
+
+</div>
+</body>
+</html>

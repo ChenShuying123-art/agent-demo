@@ -1,0 +1,174 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>课程 0003 · 从函数签名到能跑的代码：拆解 T1</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+<div class="wrap">
+
+  <p class="eyebrow">课程 0003 · RAG 项目实战 · 对应任务 T1</p>
+  <h1>从函数签名到能跑的代码：拆解 T1</h1>
+  <p class="lede">T0 教的是"<strong>模块之间</strong>的顺序"；这一课往下钻一层，教"<strong>单个函数</strong>怎么想"。T1 就三个函数，却藏着三个新手必踩的坑，和一个最值得带走的模式——<strong>内容寻址</strong>。</p>
+
+  <div class="win">
+    <strong>学完你能做到：</strong>拿到 spec 里任意一组函数签名，能独立推出"先写什么、失败怎么办、边界在哪"，并写出能自测通过的实现。
+    <br><span class="muted">配套：<a href="../reference/python-concepts-glossary.html">术语表</a> · 前置 <a href="0002-reading-t0-code.html">0002 读懂 T0</a> · 方法 <a href="0001-how-to-write-t0.html">0001 顺序</a></span>
+  </div>
+
+  <h2>一、三个新手一定会漏的坑</h2>
+  <p>T1 的三个坑都很小、但都很真实。先记住，再看代码。</p>
+
+  <h3>坑 1：外部输入不可信（安全）</h3>
+  <p>上传的文件名是<strong>用户给的</strong>。如果用户把文件名起成 <code>../../.env</code>，而你直接用它拼路径去写文件，就会覆盖到项目里的其他文件——这叫<strong>路径穿越（path traversal）</strong>。所以第一步永远是把它"拍平"成一个纯文件名：</p>
+  <pre><code>safe_name = Path(filename).name   # 只保留最后一段，丢掉任何 ../ 目录</code></pre>
+  <p class="muted">这是"信任边界"的第一课：<strong>凡是来自程序外部的东西（用户输入、网络请求），都当作不可信</strong>。</p>
+
+  <h3>坑 2：编码必须显式写</h3>
+  <p>读文件时如果不指定编码，Python 会用系统默认——在 Windows 上<strong>不是 UTF-8</strong>，于是中文文档一读就乱码、甚至直接抛 <code>UnicodeDecodeError</code>。</p>
+  <pre><code>path.read_text(encoding="utf-8")   # 不写 encoding，换台电脑就可能崩</code></pre>
+
+  <h3>坑 3：磁盘才是真相</h3>
+  <p>文件大小、上传时间，别"记"在上传参数里，要去问磁盘：</p>
+  <pre><code>stat = path.stat()          # 现读现取
+size = stat.st_size         # 而不是信 len(content) 或客户端报的值</code></pre>
+  <p class="muted">为什么？因为文件可能被改过、被换过。以磁盘为准，数据永远不会自相矛盾。</p>
+
+  <h2>二、怎么从 spec 写出代码：五步</h2>
+  <ol class="steps">
+    <li><strong>先把三个函数签名抄下来。</strong> spec §7.3 给了名字、参数、返回。签名就是图纸——<em>输入→输出</em>想清楚了，实现只是填空。</li>
+    <li><strong>每个函数只回答三个问题：</strong>给我什么？还我什么？失败会怎样？第三个问题新手最容易漏，但它直接决定你要不要 <code>raise</code>。</li>
+    <li><strong>先写最顺的那条路（happy path）。</strong> 假装一切正常，把能跑通的最短代码写出来。别一上来就想着所有异常。</li>
+    <li><strong>立刻跑一个能看见结果的例子。</strong> 别写完三个函数再一起测——这是 T0 就讲过的紧反馈环。</li>
+    <li><strong>回头补边界。</strong> 目录不存在怎么办？后缀不对怎么办？空列表怎么办？验收清单里的每一条，都是要补的边界。</li>
+  </ol>
+
+  <div class="note">
+    <span class="label">关键心态</span>
+    你不是在"写代码"，你是在<strong>回答一堆小问题</strong>。每个函数拆成 3 个小问题，难题就不见了。
+  </div>
+
+  <h2>三、逐函数拆解</h2>
+
+  <h3><code>load_document(path) -&gt; str</code>：最小、但边界最多</h3>
+  <p>逻辑一句话：按后缀判断，然后读文本。值得学的是它<strong>把错误说清楚</strong>：</p>
+  <pre><code>suffix = path.suffix.lower()
+if suffix not in SUPPORTED_SUFFIXES:
+    raise ValueError(f"不支持的文件类型：{path.name}（仅支持 {sorted(SUPPORTED_SUFFIXES)}）")
+return path.read_text(encoding="utf-8")</code></pre>
+  <p>为什么 <code>raise ValueError</code> 而不是默默返回空字符串？因为<strong>静默失败比报错更可怕</strong>：那会让错误一路飘到很远的地方才炸，且看不出源头。这和 T0 的 fail fast 是同一个思路。</p>
+  <p>还有个细节：md 文件<strong>故意不做任何清洗</strong>（不去掉 <code>#</code>）。因为标题层级是后面切分时的"强边界"，提前剥掉就丢信息了。</p>
+
+  <h3><code>save_upload(...)</code>：本任务的核心</h3>
+  <p>它要同时做三件事：落盘、去重、返回描述。顺序很重要：</p>
+  <pre><code># ① 先消毒文件名（坑 1）
+safe_name = Path(filename).name
+
+# ② 用内容算 id —— 内容相同，id 就相同
+doc_id = _compute_doc_id(content)      # sha256 前 16 位
+
+# ③ 去重：id 已存在就直接返回，不再落盘
+existing = next(iter(uploads_dir.glob(_stored_name(doc_id, "*"))), None)
+if existing is not None:
+    return _to_document(existing, doc_id, ...)
+
+# ④ 落盘，文件名带上 id 前缀
+stored_path = uploads_dir / _stored_name(doc_id, safe_name)</code></pre>
+  <p>为什么文件名要写成 <code>{doc_id}_{原名}</code>？这个小小的命名约定，一次解决了三个问题：</p>
+  <ul>
+    <li>判重只需一次 glob —— <strong>快</strong></li>
+    <li>原始文件名还在磁盘名里 —— <strong>不用额外元数据就能还原展示名</strong></li>
+    <li>id 肉眼可见 —— <strong>看日志、看目录都能对上</strong></li>
+  </ul>
+  <p class="muted">这是个通用教训：<strong>好的命名约定，能让代码少写一半逻辑。</strong></p>
+
+  <h3><code>list_documents(data_dir)</code>：过滤 + 还原</h3>
+  <p>扫目录时，不是所有文件都是文档——<code>.gitkeep</code>、或别人手动丢进来的文件都要跳过。所以有一个 <code>_is_upload_file()</code> 专门判断"这个文件名是不是我自己写出来的格式"。判断通过，再从文件名反解出 <code>doc_id</code> 和原名。这一步就是坑 3 的落地：<strong>size 和时间都从 <code>stat()</code> 现取</strong>。</p>
+
+  <h2>四、一个值得带走的模式：内容寻址</h2>
+  <p>T1 最值钱的思想就一句话：<strong>用内容算出的哈希，当内容的唯一标识</strong>。这叫<strong>内容寻址（content addressing）</strong>。</p>
+  <table>
+    <thead><tr><th>如果 id 用…</th><th>会怎样</th></tr></thead>
+    <tbody>
+      <tr><td>文件名</td><td>同内容不同名 → 存两份；改名 → 变成"新文档"</td></tr>
+      <tr><td>上传时间</td><td>同一份文件传两次 → 两份，永远去不了重</td></tr>
+      <tr><td><strong>内容哈希</strong></td><td>内容一样就是同一个 → <strong>天然去重</strong>，还顺带能校验有没有损坏</td></tr>
+    </tbody>
+  </table>
+  <p>你其实天天在用这个思想：<strong>Git 的 commit、Docker 的镜像层、网盘的"秒传"</strong>，全是内容寻址。T1 里的 <code>doc_id = sha256(内容)[:16]</code> 就是它的迷你版。</p>
+  <p class="muted">顺带一提：哈希只取前 16 位（而不是完整 64 位），是"碰撞概率低到可忽略"与"名字要短"之间的工程折中。</p>
+
+  <h2>五、亲手做一遍</h2>
+  <div class="note">
+    <span class="label">练习 A · 从签名到代码</span>
+    盖住 <code>loaders.py</code>，只看 spec §7.3 的三个签名，按"输入 / 输出 / 失败"三栏把它写成一张表。写完对照真实实现，看你漏掉了哪些"失败情况"。
+  </div>
+  <div class="note">
+    <span class="label">练习 B · 制造一个路径穿越</span>
+    在 Python 里执行 <code>Path("../../evil.md").name</code>，看看结果是什么——亲手确认"消毒"这一步确实把 <code>../</code> 吃掉了。想清楚：如果没这一步会发生什么。
+  </div>
+  <div class="note">
+    <span class="label">练习 C · 亲手看一次去重</span>
+    跑课程报告里那段验证脚本，观察日志里两次上传分别打的是 <code>命中去重=否</code> 和 <code>命中去重=是</code>，并确认 <code>data/uploads/</code> 下始终只有 1 个文件。
+  </div>
+
+  <h2>六、自测（凭记忆答）</h2>
+
+  <div class="quiz" data-answer="b">
+    <p class="q">1. 为什么 <code>save_upload</code> 要写 <code>Path(filename).name</code>？</p>
+    <button class="quiz-option" data-key="a">把文件名统一转成小写字母</button>
+    <button class="quiz-option" data-key="b">去掉路径、防止目录穿越攻击</button>
+    <button class="quiz-option" data-key="c">取出上传文件名的扩展名部分</button>
+    <button class="quiz-option" data-key="d">检查文件名长度是否超过限制</button>
+    <p class="feedback"
+       data-correct="对。外部输入不可信，先把它拍平成纯文件名，避免 ../ 写到别处。"
+       data-wrong="再想想：文件名来自用户，可能含 ../。要做的第一件事是把它拍平成纯文件名。"></p>
+  </div>
+
+  <div class="quiz" data-answer="a">
+    <p class="q">2. 为什么读文件要显式写 <code>encoding="utf-8"</code>？</p>
+    <button class="quiz-option" data-key="a">不写时中文可能乱码或直接报错</button>
+    <button class="quiz-option" data-key="b">写了以后读取速度会明显更快</button>
+    <button class="quiz-option" data-key="c">不写时文件会被当成二进制打开</button>
+    <button class="quiz-option" data-key="d">写了就能自动猜出文件真实编码</button>
+    <p class="feedback"
+       data-correct="对。不写就用系统默认编码，Windows 上不是 UTF-8，中文会乱码或报错。"
+       data-wrong="再想想：不写编码会用系统默认值，Windows 上并非 UTF-8。"></p>
+  </div>
+
+  <div class="quiz" data-answer="a">
+    <p class="q">3. <code>list_documents</code> 里文件的 size 从哪来最可靠？</p>
+    <button class="quiz-option" data-key="a">直接读磁盘上文件的真实大小</button>
+    <button class="quiz-option" data-key="b">用上传时客户端报过来的数值</button>
+    <button class="quiz-option" data-key="c">用字符数乘每个字符的字节数</button>
+    <button class="quiz-option" data-key="d">用文件名里记录的那串数字</button>
+    <p class="feedback"
+       data-correct="对。磁盘才是真相，用 stat() 现取，永远不会和文件自相矛盾。"
+       data-wrong="再想想：文件可能被改过。以磁盘为准，用 stat() 现读。"></p>
+  </div>
+
+  <div class="quiz" data-answer="a">
+    <p class="q">4. "内容寻址"的核心思想是什么？</p>
+    <button class="quiz-option" data-key="a">用内容算出的哈希当唯一标识</button>
+    <button class="quiz-option" data-key="b">用文件名当内容的唯一标识</button>
+    <button class="quiz-option" data-key="c">用上传时间当内容的唯一标识</button>
+    <button class="quiz-option" data-key="d">用文件大小当内容的唯一标识</button>
+    <p class="feedback"
+       data-correct="对。内容一样 → 哈希一样 → id 一样，天然去重。Git、Docker 都用这招。"
+       data-wrong="再想想：核心是"用内容算哈希"，内容相同必然得到同一个 id。"></p>
+  </div>
+
+  <h2>七、想深入时读这个</h2>
+  <p><strong>首选一手资源：</strong><a href="https://docs.python.org/zh-cn/3/library/pathlib.html">Python 官方文档 · pathlib（官方中文）</a>——本课用到的 <code>Path.name</code> / <code>.suffix</code> / <code>read_text</code> / <code>glob</code> 都在这里。读 "Basic use" 一节即可。</p>
+  <p class="muted">完整资源见 <a href="../RESOURCES.md">RESOURCES.md</a>；术语随时查 <a href="../reference/python-concepts-glossary.html">概念术语表</a>。建议顺序：0002 → 0001 → 0003。</p>
+
+  <div class="foot">
+    任何一条不清楚就直接问我，比如"为什么哈希要用 sha256 而不是 md5"。我是你的老师，问多基础都可以。
+  </div>
+
+</div>
+<script src="../assets/quiz.js"></script>
+</body>
+</html>

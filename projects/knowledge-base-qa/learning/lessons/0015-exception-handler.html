@@ -1,0 +1,283 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>课程 0015 · 概念补课：自定义异常与 @app.exception_handler</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+<div class="wrap">
+
+  <p class="eyebrow">课程 0015 · 概念补课 · 配合 FastAPI 手册第八节</p>
+  <h1>自定义异常与异常处理器</h1>
+  <p class="lede">速查表里那句"<strong>raise 自定义异常，配合 @app.exception_handler</strong>"，其实藏着三个问题：<strong>① raise 出去之后谁接住？② 为什么要"自定义"异常？③ @app.exception_handler 这个装饰器到底在干什么？</strong>这一课把这三件事一次讲透。</p>
+
+  <div class="win">
+    <strong>学完你能做到：</strong>看懂 <code>class ApiError(Exception)</code> 每一行在干嘛；说清"异常怎么从深层代码一路冒泡到顶层被翻译成 JSON"；并能自己决定——<strong>什么时候该定义一个新异常，什么时候用现成的就够。</strong>
+    <br><span class="muted">配套：<a href="../reference/fastapi-usage.html">FastAPI 用法手册</a> · <a href="../reference/python-concepts-glossary.html">术语表</a> · 前置 <a href="0014-how-to-write-t10.html">课程 0014</a></span>
+  </div>
+
+  <h2>一、先把"异常"这个语法补上</h2>
+  <p>异常（exception）是 Python 表达"<strong>这件事做不下去了</strong>"的方式。用 <code>raise</code> 主动抛出：</p>
+  <pre><code>raise ValueError("doc_id 不存在")   # 抛出一个 ValueError 对象</code></pre>
+  <p>抛出去之后会怎样？<strong>它会沿着"谁调用了谁"的链条，一层层往上冒</strong>，直到有人接住。接住用的是 <code>try / except</code>：</p>
+  <pre><code>try:
+    do_something()          # 这里可能抛错
+except ValueError as exc:   # 接住 ValueError 类型的错，取个名字叫 exc
+    print("出错了：", exc)</code></pre>
+  <p>如果一路冒到最顶上都没人接，程序就崩，并打印一大段 traceback。<strong>你在终端见到的报错，就是"冒泡到底、无人接住"的样子。</strong></p>
+
+  <div class="note">
+    <span class="label">异常对象本身可以带东西</span>
+    <code>ValueError("一句话")</code> 只是带了一句话。但异常本质是个<strong>对象</strong>，你可以自己定义一种异常、往它身上挂任意字段——
+    这正是本项目 <code>ApiError</code> 干的事：除了消息，还顺手带上 HTTP 状态码和错误 code。
+  </div>
+
+  <h2>二、反面写法：为什么不让"抛错的地方"自己拼响应</h2>
+  <p>先想清楚"不这么做会怎样"，才明白为什么要这么设计。假设不用异常、也不统一处理，会遇到两种写法，都不好：</p>
+  <pre><code># 写法 A：每个路由自己拼错误响应
+@router.delete("/documents/{doc_id}")
+def delete_document(doc_id, request):
+    doc = find(doc_id)
+    if doc is None:
+        return JSONResponse(status_code=404, content={"error": {"code": "...", "message": "..."}})
+    ...   # 每个路由、每个出错分支都来一遍 → 形状迟早漂移</code></pre>
+  <pre><code># 写法 B：在深层代码里直接拼 HTTP 响应
+# （kbqa/pipeline.py 里）
+if doc_id not in available:
+    return JSONResponse(404, ...)     # ← pipeline 凭什么知道 HTTP？
+</code></pre>
+  <table>
+    <thead><tr><th>问题</th><th>后果</th></tr></thead>
+    <tbody>
+      <tr><td>错误格式散落在各处</td><td>改一次"信封"要翻很多文件，还容易改漏</td></tr>
+      <tr><td>深层代码要 import Web 框架的东西</td><td>核心库被 HTTP "污染"，Notebook 里就不能复用了</td></tr>
+      <tr><td>出错要靠 <code>return</code> 层层传递</td><td>中间每个函数都得知道"可能要返回错误"</td></tr>
+    </tbody>
+  </table>
+  <p>异常天然解决了第三个问题：<strong>抛出去就自动往上冒，中间的函数完全不用管。</strong></p>
+
+  <h2>三、正解第一步：自定义异常 ApiError</h2>
+  <p>本项目的做法是"<strong>只负责抛，不负责长什么样</strong>"。先定义一个能携带信息的异常：</p>
+  <pre><code>class ApiError(Exception):
+    def __init__(self, status_code: int, code: str, message: str) -&gt; None:
+        super().__init__(message)   # ① 把 message 交给父类 Exception 保管
+        self.status_code = status_code   # ② 额外挂三个字段
+        self.code = code
+        self.message = message</code></pre>
+  <table>
+    <thead><tr><th>行</th><th>在干嘛</th><th>为什么必须这样</th></tr></thead>
+    <tbody>
+      <tr><td><code>class ApiError(Exception)</code></td><td>继承内置的 <code>Exception</code></td><td>只有 <code>Exception</code> 及其子类才能被 <code>raise</code>；也让框架能统一识别它</td></tr>
+      <tr><td><code>super().__init__(message)</code></td><td>调用父类的构造函数</td><td>让异常带着"标准的一句话消息"（<code>str(exc)</code> 能取到，日志里也有）</td></tr>
+      <tr><td><code>self.status_code = ...</code></td><td>往对象上挂属性</td><td><strong>这是"自定义"的全部意义</strong>：让异常除了消息，还能携带结构化数据</td></tr>
+    </tbody>
+  </table>
+  <p>于是抛的时候可以一次带全三种信息：</p>
+  <pre><code>raise ApiError(404, "document_not_found", f"文档不存在：{doc_id}")</code></pre>
+  <p class="muted">对比一下 <code>raise Exception("文档不存在")</code>：只有一句话，处理器想返回 404 还是 400 都无从判断。<strong>自定义异常 = 让错误变成"有结构的数据"。</strong></p>
+
+  <h2>四、正解第二步：@app.exception_handler 在干什么</h2>
+  <p>异常冒泡到顶层后，框架得知道"<strong>这种异常该翻译成什么响应</strong>"。办法是提前登记一张对照表——<strong>和 <code>@router.get("/health")</code> 登记"URL → 函数"是同一个套路</strong>：</p>
+  <pre><code>@app.exception_handler(ApiError)              # 登记：ApiError 类型 → 下面这个函数
+async def _handle_api_error(request, exc):
+    return _error_json(exc.status_code, exc.code, exc.message)</code></pre>
+  <table>
+    <thead><tr><th></th><th>路由装饰器</th><th>异常处理器装饰器</th></tr></thead>
+    <tbody>
+      <tr><td>登记表的"键"</td><td>URL + HTTP 方法</td><td>异常类型</td></tr>
+      <tr><td>表里的"值"</td><td>一个路由函数</td><td>一个处理函数</td></tr>
+      <tr><td>什么时候触发</td><td>请求命中这个 URL</td><td>异常冒泡到顶层、且类型匹配</td></tr>
+    </tbody>
+  </table>
+  <p>完整的一次冒泡过程长这样：</p>
+  <div class="diagram">
+    <div class="dbox"><strong>路由函数</strong><span>raise ApiError(404, ...)</span></div>
+    <div class="darrow">↓ 函数里没人 try/except，交给调用它的那一层</div>
+    <div class="dbox"><strong>FastAPI 路由分发</strong><span>继续往上冒</span></div>
+    <div class="darrow">↓ 还是没有</div>
+    <div class="dbox"><strong>异常处理中间件</strong><span>查表：ApiError → 哪个处理函数？</span></div>
+    <div class="darrow">↓ 命中 _handle_api_error</div>
+    <div class="dbox lead"><strong>返回 JSONResponse(404, {error:{...}})</strong><span>由处理器决定长什么样</span></div>
+    <div class="dcap">图 1 · 抛的人只管"什么错"，长什么样由顶层那张表决定</div>
+  </div>
+  <p class="muted">所以处理器函数的签名是固定的：<code>(request, exc)</code> 进来，<code>Response</code> 出去。你只是"填空"，不用管它是怎么被调用的。</p>
+
+  <h3>为什么包在 install_exception_handlers(app) 里</h3>
+  <pre><code>def install_exception_handlers(app: FastAPI) -&gt; None:
+    @app.exception_handler(ApiError)
+    async def _handle_api_error(request, exc): ...
+
+    @app.exception_handler(ValueError)
+    async def _handle_value_error(request, exc): ...
+    # ... 其余几个
+
+# main.py 里，装配时调用一次
+install_exception_handlers(app)</code></pre>
+  <p>把"一次性注册好几个处理器"打包成一个动作，好处和 T0 的 <code>setup_logging()</code> 一样：<strong>规格集中在一处，启动时执行一次。</strong>这些嵌套函数能"看到"外面的 <code>app</code>，是因为它们都是在这个函数内部定义的（闭包）。</p>
+
+  <h2>五、好几个处理器，框架怎么挑？（就近匹配）</h2>
+  <p>本项目注册了 6 个处理器。当异常冒到顶层，框架会<strong>沿着这个异常类型的"家族谱系"往上找，谁最具体就用谁</strong>：</p>
+  <pre><code>LLMError(RuntimeError)  →  自己 → RuntimeError → Exception(兜底)
+ApiError(Exception)     →  自己 → Exception(兜底)</code></pre>
+  <table>
+    <thead><tr><th>异常</th><th>被哪个处理器接住</th><th>返回</th></tr></thead>
+    <tbody>
+      <tr><td><code>ApiError</code></td><td><code>_handle_api_error</code></td><td>用它自己带的 <code>status_code</code></td></tr>
+      <tr><td><code>ValueError</code></td><td><code>_handle_value_error</code></td><td>400</td></tr>
+      <tr><td><code>RequestValidationError</code></td><td><code>_handle_validation_error</code></td><td>422</td></tr>
+      <tr><td><code>LLMError</code> / <code>OpenAIError</code></td><td>各自的处理器</td><td>502（透传上游 code）</td></tr>
+      <tr><td>其他任何异常</td><td><strong>兜底的 <code>Exception</code> 处理器</strong></td><td>500</td></tr>
+    </tbody>
+  </table>
+  <div class="note">
+    <span class="label">兜底那句 logger.exception 不能省</span>
+    最后那个 <code>@app.exception_handler(Exception)</code> 会把<strong>所有漏网的异常</strong>也转成统一信封——
+    好处是前端永远拿到同一个形状；坏处是<strong>如果不打日志，这个 500 就"静默"了，谁也不知道出了什么事。</strong>
+    所以兜底处理器里必须 <code>logger.exception(...)</code>，把堆栈完整记下来。
+  </div>
+
+  <h2>六、为什么不直接用 HTTPException？</h2>
+  <p>FastAPI 自带了 <code>HTTPException</code>，一行就能返回错误，确实更简单：</p>
+  <pre><code>raise HTTPException(status_code=404, detail="文档不存在")   # 响应是 {"detail": "文档不存在"}</code></pre>
+  <p>但对本项目不够用，原因有三：</p>
+  <table>
+    <thead><tr><th>问题</th><th>自定义 + handler 的解法</th></tr></thead>
+    <tbody>
+      <tr><td>响应形状是 <code>{"detail": ...}</code>，和我们要的 <code>{"error": {code, message}}</code> 不一样</td><td>形状在处理器里统一拼，路由不用管</td></tr>
+      <tr><td>想带 <code>code</code> 这种自定义字段，得往 <code>detail</code> 里塞字典，很别扭</td><td>自定义异常天生能挂任意字段</td></tr>
+      <tr><td>深层代码（pipeline）抛的错 <strong>根本不认识 HTTP</strong>，没法抛 HTTPException</td><td>抛普通异常（如 <code>ValueError</code>），由顶层翻译</td></tr>
+    </tbody>
+  </table>
+  <p>最后一条最关键，它就是课程 0014 讲的"<strong>关注点分离</strong>"的落地：</p>
+  <pre><code># kbqa/pipeline.py —— 核心库，完全不知道 HTTP 的存在
+if missing:
+    raise ValueError(f"以下 doc_id 在上传目录中不存在：{missing}")
+
+# api/routes.py —— 顶层登记
+@app.exception_handler(ValueError)
+async def _handle_value_error(request, exc):
+    return _error_json(400, "invalid_request", str(exc))
+# 于是同一个 ValueError，在 Notebook 里是普通报错，在 API 里是结构化 400</code></pre>
+  <div class="note">
+    <span class="label">一个类比</span>
+    餐厅里，<strong>服务员（路由）只负责说"这道菜没有了"</strong>；至于具体怎么向客人道歉、要不要送一张券，是<strong>前台规章（处理器）</strong>统一规定的。
+    服务员不需要知道规章细节，规章改了也不用去培训每个服务员。
+  </div>
+
+  <h2>七、实测：本项目真实的返回</h2>
+  <p>下面两条是刚跑出来的真实响应（用一个最小应用 + 本项目的 <code>install_exception_handlers</code>）：</p>
+  <table>
+    <thead><tr><th>抛出的异常</th><th>状态码</th><th>响应体</th></tr></thead>
+    <tbody>
+      <tr><td>未处理：<code>RuntimeError("意料之外的错误")</code></td><td><strong>500</strong></td><td><code>{"error":{"code":"internal_error","message":"意料之外的错误"}}</code>（同时终端打印完整堆栈）</td></tr>
+      <tr><td>自定义：<code>ApiError(409, "conflict_demo", "演示用：业务冲突")</code></td><td><strong>409</strong></td><td><code>{"error":{"code":"conflict_demo","message":"演示用：业务冲突"}}</code></td></tr>
+    </tbody>
+  </table>
+  <p>再看 T10 验收里真实业务路径的返回：</p>
+  <table>
+    <thead><tr><th>触发点</th><th>抛的异常</th><th>最终响应</th></tr></thead>
+    <tbody>
+      <tr><td>索引一个不存在的 doc_id</td><td>pipeline 抛 <code>ValueError</code></td><td><code>400 invalid_request</code></td></tr>
+      <tr><td>删除不存在的文档</td><td>路由抛 <code>ApiError(404, ...)</code></td><td><code>404 document_not_found</code></td></tr>
+      <tr><td>请求体漏了 question</td><td><code>RequestValidationError</code></td><td><code>422 validation_error</code></td></tr>
+      <tr><td>上游 Key 无效</td><td><code>LLMError</code></td><td><code>502 invalid_api_key</code></td></tr>
+    </tbody>
+  </table>
+  <p class="muted">注意第二行：<strong>抛的人只写了"什么错"，404 这个数字、信封这个形状，全是处理器补上的。</strong></p>
+
+  <h2>八、反例：别过度使用</h2>
+  <p>自定义异常很好用，但别给每种小情况都造一个类，否则会得到一堆没人记得住的异常名。</p>
+  <table>
+    <thead><tr><th>该自定义</th><th>用现成的就够</th></tr></thead>
+    <tbody>
+      <tr><td>需要携带<strong>额外字段</strong>（如 <code>status_code</code> / <code>code</code>）</td><td>只是"值不合法" → <code>ValueError</code></td></tr>
+      <tr><td>需要被<strong>单独翻译</strong>成不同响应</td><td>只是"找不到文件" → <code>FileNotFoundError</code></td></tr>
+      <tr><td>需要让调用方<strong>按类型分别处理</strong></td><td>框架已经抛好的（如 <code>RequestValidationError</code>）</td></tr>
+    </tbody>
+  </table>
+  <p>本项目只自定义了一个 <code>ApiError</code>（在 T6 里还定义了带 <code>code</code> 的 <code>LLMError</code>）——<strong>关键是"信息量不够"或"翻译方式不同"时才新建，别为了好看而堆砌。</strong></p>
+
+  <h2>九、亲手做一遍</h2>
+
+  <div class="note">
+    <span class="label">练习 A · 亲眼看见"冒泡"</span>
+    在任意一个路由函数里临时加一行 <code>raise RuntimeError("测试冒泡")</code>，用 <code>TestClient(app, raise_server_exceptions=False)</code> 调它。
+    观察两件事：① 返回的是不是 500 统一信封；② 终端是不是打印了完整堆栈。<strong>再看一眼：这个路由里没人 try/except，异常是自己"冒"上去的。</strong>（看完删掉那行。）
+  </div>
+
+  <div class="note">
+    <span class="label">练习 B · 体会"自定义异常要带什么"</span>
+    把 <code>raise ApiError(404, "document_not_found", ...)</code> 改成 <code>raise Exception("文档不存在")</code>，调 <code>DELETE</code> 试试。
+    提问：处理器还能不能知道该返回 404？<strong>这就是为什么要自定义。</strong>
+  </div>
+
+  <div class="note">
+    <span class="label">练习 C · 想清楚一个设计题</span>
+    如果删掉兜底的 <code>@app.exception_handler(Exception)</code>，一个没预料到的异常会让前端收到什么？和现在的统一信封相比，哪种更适合一个要给别人调用的接口？
+  </div>
+
+  <div class="note">
+    <span class="label">练习 D · 找一找"就近匹配"</span>
+    本项目注册了 <code>ValueError</code> 和 <code>Exception</code> 两个处理器。一个 <code>ValueError</code> 会被哪个接住？为什么不是兜底那个？（提示：看图 1 上面那句"家族谱系"。）
+  </div>
+
+  <h2>十、自测（凭记忆答）</h2>
+
+  <div class="quiz" data-answer="c">
+    <p class="q">1. `class ApiError(Exception)` 里，`super().__init__(message)` 这一行的作用是？</p>
+    <button class="quiz-option" data-key="a">把异常对象注册到 FastAPI 的处理器表里</button>
+    <button class="quiz-option" data-key="b">给这个异常对象补上 status_code 字段</button>
+    <button class="quiz-option" data-key="c">调用父类的构造函数，让异常带上标准消息</button>
+    <button class="quiz-option" data-key="d">声明这个异常可以被安全地打印到日志</button>
+    <p class="feedback"
+       data-correct="对。父类 Exception 保管 message；挂 status_code/code 是后面两行自己加的。"
+       data-wrong="再想想：super() 是"调用父类"，不是注册、也不是加字段。"></p>
+  </div>
+
+  <div class="quiz" data-answer="b">
+    <p class="q">2. 路由函数里 `raise ApiError(...)` 之后，异常是怎么到达处理器的？</p>
+    <button class="quiz-option" data-key="a">处理器必须被路由函数显式调用才会执行</button>
+    <button class="quiz-option" data-key="b">异常沿调用栈冒泡到顶层，框架按类型查表找到处理器</button>
+    <button class="quiz-option" data-key="c">FastAPI 会立刻中断程序，重启后再请求一次</button>
+    <button class="quiz-option" data-key="d">路由的返回值会被自动替换成异常对象的内容</button>
+    <p class="feedback"
+       data-correct="对。抛的人不需要知道处理器是谁，这正是解耦的好处。"
+       data-wrong="再想想：这是"冒泡 + 顶层查表"，不是显式调用。"></p>
+  </div>
+
+  <div class="quiz" data-answer="a">
+    <p class="q">3. 下面哪种情况最值得定义一个自定义异常，而不是用现成的？</p>
+    <button class="quiz-option" data-key="a">错误需要携带额外的结构化字段（如 code / status_code）</button>
+    <button class="quiz-option" data-key="b">只要觉得这个错误的业务名字比较重要</button>
+    <button class="quiz-option" data-key="c">想让错误信息在日志里显得更专业一些</button>
+    <button class="quiz-option" data-key="d">希望这个错误永远不要被任何人接住</button>
+    <p class="feedback"
+       data-correct="对。"信息量不够"或"翻译方式不同"才新建；否则 ValueError 就够了。"
+       data-wrong="再想想：自定义的意义在于"能带数据 / 能被单独翻译"，不是为了让名字好听。"></p>
+  </div>
+
+  <div class="quiz" data-answer="d">
+    <p class="q">4. 为什么兜底的 `@app.exception_handler(Exception)` 里一定要打日志？</p>
+    <button class="quiz-option" data-key="a">因为不打日志 FastAPI 会拒绝注册这个处理器</button>
+    <button class="quiz-option" data-key="b">因为不打印堆栈就无法返回 JSON 响应</button>
+    <button class="quiz-option" data-key="c">因为日志能自动把 500 升级成 502</button>
+    <button class="quiz-option" data-key="d">因为统一信封会盖住异常，不打日志就无从排查</button>
+    <p class="feedback"
+       data-correct="对。信封把堆栈"吞"了，必须主动 logger.exception 留下痕迹，否则 500 会静默消失。"
+       data-wrong="再想想：处理器把异常转成了普通响应，堆栈就没了——所以必须自己记下来。"></p>
+  </div>
+
+  <h2>十一、想深入时读这个</h2>
+  <p><strong>首选一手资源：</strong>先回 <a href="../reference/fastapi-usage.html">FastAPI 用法手册</a>第八节，再看项目里的真实代码：<code>api/routes.py</code> 的 <code>ApiError</code> 与 <code>install_exception_handlers()</code>。</p>
+  <p class="muted">外部延伸：<a href="https://fastapi.tiangolo.com/zh/tutorial/handling-errors/">FastAPI 官方教程 · 处理错误</a>（官方中文）、<a href="https://docs.python.org/zh-cn/3/tutorial/errors.html">Python 官方教程 · 错误和异常</a>（官方中文）。完整资源见 <a href="../RESOURCES.md">RESOURCES.md</a>。</p>
+
+  <div class="foot">
+    不清楚就直接问，比如"闭包是什么""为什么处理器要 async"。我是你的老师，问多基础都可以。
+  </div>
+
+</div>
+<script src="../assets/quiz.js"></script>
+</body>
+</html>

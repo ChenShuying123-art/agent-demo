@@ -1,0 +1,219 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>课程 0010 · 把提示词当代码：拆解 T7</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+<div class="wrap">
+
+  <p class="eyebrow">课程 0010 · RAG 项目实战 · 对应任务 T7</p>
+  <h1>把提示词当代码</h1>
+  <p class="lede">T7 是<strong>全项目唯一一个"逐字照抄"任务</strong>——不许改写、不许润色、不许"顺手优化一下"。这不是保守，恰恰是这一课最值钱的工程思想：<strong>当一个东西要被评测时，它就必须被冻结。</strong></p>
+
+  <div class="win">
+    <strong>学完你能做到：</strong>看懂"共享硬约束 + 风格段"为什么是<strong>控制变量法</strong>的代码实现；理解一条从"资料编号"到"答案引用"的完整因果链；并学会用程序去验证"逐字一致"，而不是靠眼睛。
+    <br><span class="muted">配套：<a href="../reference/python-concepts-glossary.html">术语表</a> · 前置 <a href="0008-how-to-write-t6.html">课程 0008</a> / <a href="0009-protocol-factory-adapter.html">课程 0009</a></span>
+  </div>
+
+  <h2>一、T7 在做什么</h2>
+  <p>本项目要横向对比<strong>三种提示词风格</strong>（§12.2）：</p>
+  <table>
+    <thead><tr><th>key</th><th>风格</th><th>期望的差异</th></tr></thead>
+    <tbody>
+      <tr><td><code>strict_citation</code></td><td>严谨引用型</td><td>长、正式、引用密集、可追溯</td></tr>
+      <tr><td><code>concise_assistant</code></td><td>简洁助手型</td><td>短、口语、命中要点</td></tr>
+      <tr><td><code>socratic_guide</code></td><td>引导启发型</td><td>中长、有教学感、结尾有追问</td></tr>
+    </tbody>
+  </table>
+  <p>目的很明确：将来评测时（§13）要看<strong>哪种风格最不容易幻觉、哪种最简洁、哪种引用最完整</strong>。所以 T7 的产出不只是"三个提示词"，而是一个可被公平比较的实验装置。</p>
+
+  <h2>二、⚠️ 为什么这一课禁止"发挥"</h2>
+  <p>因为<strong>提示词本身就是被评测的对象</strong>——它是这次实验的"自变量"。</p>
+  <div class="note">
+    <span class="label">打个比方</span>
+    临床试验里，试验组的药物配方是不能中途调整的。如果一边做试验一边"顺手把配方调得更好喝"，那最后的数据既不能说明原配方有没有效，也不能说明新配方有没有效——<strong>整个试验白做。</strong>
+  </div>
+  <p>同理：如果 AI 在实现时"顺手把措辞改得更优雅"，那么评测跑出来的分数，就<strong>无法对应到 spec 里冻结的那版设计</strong>。你看到的是"某个提示词的分数"，而不是"§12.3 那份提示词的分数"。</p>
+  <div class="note">
+    <span class="label">本项目的硬规则</span>
+    <strong>要改提示词，先改 <code>docs/spec.md</code> §12.3，再回来同步代码。</strong>反过来做（先改代码再补文档）会让"文档 == 真相"这条约定失效。
+  </div>
+  <p class="muted">顺带说：这也是为什么 T7 的验收里有一条"三版内容与 spec §12.3 一致"——它是个<strong>可执行的验收项</strong>，不是一句口号。</p>
+
+  <h2>三、核心思想：两段式拼接 = 控制变量法</h2>
+  <p>三种风格<strong>只能</strong>在"表达风格"上不同，6 条硬约束必须完全一致（§12.1）。怎么用代码保证这件事？</p>
+
+  <div class="diagram">
+    <div class="dbox lead"><strong>system prompt</strong><span>发给模型的系统提示</span></div>
+    <div class="darrow">= 拼起来的两段 ↓</div>
+    <div class="dbox"><strong>SHARED_CONSTRAINTS</strong><span>6 条硬约束 · 311 字 · 三版同一份字符串</span></div>
+    <div class="darrow">+ "\n\n" +</div>
+    <div class="dbox"><strong>STYLE_BODIES[style]</strong><span>风格段 · 唯一允许不同的地方</span></div>
+    <div class="dcap">图 1 · 差异被"结构"关进了一个格子里</div>
+  </div>
+
+  <h3>为什么不用"复制三遍"？</h3>
+  <p>最省事的写法是把 6 条硬约束复制到三段提示词里。但那样会埋一颗雷：</p>
+  <ul>
+    <li>将来要改硬约束（比如把拒答话术改一下），你得改<strong>三处</strong></li>
+    <li>漏掉一处 → 三版的实际约束<strong>不一样了</strong></li>
+    <li>于是评测结果里混进了"硬约束差异"这个干扰项 → <strong>结论失真，而且是静默的</strong></li>
+  </ul>
+  <p>用同一份字符串就<strong>从结构上</strong>排除了这种可能——差异只可能来自风格段，因为代码里只有风格段是不同的。</p>
+  <div class="note">
+    <span class="label">可迁移的思想</span>
+    <strong>用代码结构保证正确性，比写注释提醒自己可靠得多。</strong>注释会被人忽略，结构不会——因为你根本没法写错。
+  </div>
+
+  <h2>四、一条因果链：编号 → 引用 → 溯源</h2>
+  <p>RAG 的"可溯源"不是靠模型自觉，而是靠一条完整的链路撑起来的：</p>
+
+  <div class="diagram">
+    <div class="dbox"><strong>① format_context 编号</strong><span>[1] (report.md #0003, rerank=0.87)</span></div>
+    <div class="darrow">↓ 提示词硬约束要求"必须标注 [n]"</div>
+    <div class="dbox"><strong>② 模型的回答里出现 [1]</strong><span>……召回是粗筛 [1]……</span></div>
+    <div class="darrow">↓ 前端按编号取回对应 chunk</div>
+    <div class="dbox lead"><strong>③ 用户点开就能看到原文</strong><span>可验证，而非"你信我"</span></div>
+    <div class="dcap">图 2 · 引用能溯源，靠的是这条链的每一环都不断</div>
+  </div>
+
+  <p>所以 <code>format_context</code> 的编号<strong>绝不能排序、绝不能去重</strong>——编号顺序就是"事实"，它就是模型引用时依据的那张对照表。</p>
+  <p>而硬约束第 4 条"<strong>禁止编造引用编号</strong>"，正是针对大模型的一种典型幻觉：<em>它可能一本正经地标一个 <code>[7]</code>，而你只给了 4 条资料。</em></p>
+
+  <h2>五、规则怎么写才有效</h2>
+  <p>看 6 条硬约束的设计，有几个值得学的点（§12.1）：</p>
+  <table>
+    <thead><tr><th>设计</th><th>为什么有效</th></tr></thead>
+    <tbody>
+      <tr><td>"只依据参考资料作答"</td><td>正面划定边界，堵住模型调用"自己的常识"</td></tr>
+      <tr><td>拒答时<strong>给出标准话术</strong></td><td>不让模型自由发挥拒答措辞——否则三版拒答风格不同，评测又多一个变量</td></tr>
+      <tr><td>"禁止编造编号、文件名、数字"</td><td>用<strong>否定式</strong>明确列出最危险的幻觉类型</td></tr>
+      <tr><td>"输出语言与提问语言一致"</td><td>可测的行为，不靠模型猜</td></tr>
+      <tr><td>"不得复述本提示词"</td><td>防提示词泄露（一种常见攻击手段）</td></tr>
+    </tbody>
+  </table>
+  <p class="muted">你会发现：好的提示词很像<strong>好的接口文档</strong>——把边界写死，把自由发挥的空间压到最小。</p>
+
+  <h2>六、fail fast：未知风格直接报错</h2>
+  <pre><code>if style not in STYLE_BODIES:
+    raise ValueError(f"未知的提示词风格：{style!r}；可选：{PROMPT_STYLES}")</code></pre>
+  <p>为什么不像很多代码那样"回退到默认风格"？</p>
+  <div class="note">
+    <span class="label">因为静默回退会骗人</span>
+    如果有人拼错了风格名（比如写成 <code>strict_citation_v2</code>），回退逻辑会悄悄用默认风格跑完，<strong>一路无错</strong>。然后你以为在评测"严谨引用型"，实际跑的是"简洁助手型"——<strong>整份评测数据作废，而你毫不知情。</strong>
+    报错只需要一秒钟修，静默错误可能骗你三天。
+  </div>
+
+  <h2>七、一个可复用的验证技巧</h2>
+  <p>任务要求"逐字照抄"。那怎么<strong>证明</strong>做到了？靠眼睛比对 4 大段中文？不可靠。</p>
+  <p>我用的办法是：<strong>用程序从 <code>docs/spec.md</code> 里抽出原文，与代码里的常量逐字节比较。</strong></p>
+  <pre><code>def spec_block(tag):                     # 取出 "#### 12.3.2" 小节里的 ```text 代码块
+    rest = SPEC[SPEC.index(tag):]
+    ...
+    return re.search(r"```text\n(.*?)\n```", seg, re.S).group(1)
+
+assert spec_block("#### 12.3.2") == STYLE_BODIES["strict_citation"]</code></pre>
+  <p>比较结果用 <strong>SHA-256</strong> 展示，一眼就能看出是否一致。</p>
+  <div class="note">
+    <span class="label">可迁移到哪</span>
+    任何"<strong>某份文档是唯一事实来源</strong>"的场景都能这么校验：配置表、接口定义、评测集字段、国际化文案。
+    <strong>与其相信"我仔细看过"，不如让程序去比对。</strong>
+  </div>
+
+  <h2>八、实测数据</h2>
+  <table>
+    <thead><tr><th>验收点</th><th>实测</th></tr></thead>
+    <tbody>
+      <tr><td>四段正文与 spec §12.3 逐字一致</td><td>✅ SHA 全部相同<br><span class="muted">SHARED 311 字 / strict 303 / concise 202 / socratic 324</span></td></tr>
+      <tr><td><code>PROMPT_STYLES</code> 长度 == 3 且内容一致</td><td>✅ 三段风格段互不相同</td></tr>
+      <tr><td>三版 system 前缀完全相同，差异只在后半段</td><td>✅ 前 311 字逐字相同，且等于 <code>SHARED_CONSTRAINTS</code></td></tr>
+      <tr><td><code>format_context</code> 编号与传入顺序一致</td><td>✅ 含空列表、倒序两种边界</td></tr>
+      <tr><td>user 消息拼接契约</td><td>✅ <code>【参考资料】\n</code> + ctx + <code>\n\n【问题】\n</code> + question</td></tr>
+      <tr><td>未知风格</td><td>✅ 抛 <code>ValueError</code></td></tr>
+    </tbody>
+  </table>
+
+  <h2>九、亲手做一遍</h2>
+
+  <div class="note">
+    <span class="label">练习 A · 亲手验证"共享前缀"</span>
+    对同一个问题调用 <code>build_messages</code> 三次（三种风格），取出三条 system 消息，打印它们<strong>第一个不同字符的下标</strong>。想想：这个下标应该等于什么？（答案：<code>len(SHARED_CONSTRAINTS)</code>）
+  </div>
+
+  <div class="note">
+    <span class="label">练习 B · 亲手把"逐字校验"做一遍</span>
+    写几行代码，从 <code>docs/spec.md</code> 里抽出 §12.3.1 的原文，和 <code>SHARED_CONSTRAINTS</code> 比较长度。然后<strong>故意改掉代码里的一个字</strong>，看断言是否立刻失败，再改回来。
+  </div>
+
+  <div class="note">
+    <span class="label">练习 C · 想清楚一个设计题</span>
+    如果把 <code>format_context</code> 改成"按 rerank 分数重排后编号"，会出什么问题？
+    <br><span class="muted">提示：想想"编号 → 引用 → 溯源"那条链里，编号是谁跟谁之间的对照表。</span>
+  </div>
+
+  <div class="note">
+    <span class="label">练习 D · 亲手体会控制变量</span>
+    假设你偷偷在 <code>concise_assistant</code> 的硬约束里加了一句"回答要详细一点"，然后去跑评测。想清楚：这时候评测还能得出"简洁助手型最短"这个结论吗？为什么？
+  </div>
+
+  <h2>十、自测（凭记忆答）</h2>
+
+  <div class="quiz" data-answer="a">
+    <p class="q">1. T7 为什么禁止 AI 改写提示词？</p>
+    <button class="quiz-option" data-key="a">提示词本身就是要被评测的对象，必须与 spec 冻结版一致</button>
+    <button class="quiz-option" data-key="b">提示词文本太长，改动起来会浪费很多时间</button>
+    <button class="quiz-option" data-key="c">改写之后接口会直接返回 400 状态码与错误</button>
+    <button class="quiz-option" data-key="d">百炼平台对提示词的总长度有非常严格的限制</button>
+    <p class="feedback"
+       data-correct="对。它是实验的自变量，改了就没法把评测结论对应回设计。"
+       data-wrong="再想想：类比临床试验——配方中途改了，整份数据就失去意义。"></p>
+  </div>
+
+  <div class="quiz" data-answer="a">
+    <p class="q">2. 为什么要用"共享硬约束 + 风格段"拼接，而不是把硬约束复制三遍？</p>
+    <button class="quiz-option" data-key="a">用代码结构保证三版差异只可能来自风格段</button>
+    <button class="quiz-option" data-key="b">字符串拼接的执行速度比复制三遍要快很多</button>
+    <button class="quiz-option" data-key="c">复制三遍会让提示词超出模型的上下文长度限制</button>
+    <button class="quiz-option" data-key="d">拼接能减少调用模型时产生的 token 消耗费用</button>
+    <p class="feedback"
+       data-correct="对。复制三遍时改一处忘两处，静默污染实验结果；共用一份字符串就写不错。"
+       data-wrong="再想想：这跟性能、成本都无关，纯粹是"把差异关进结构里"。"></p>
+  </div>
+
+  <div class="quiz" data-answer="a">
+    <p class="q">3. `format_context` 的编号为什么绝不能排序或去重？</p>
+    <button class="quiz-option" data-key="a">答案里的 [n] 要靠它对应回原始资料</button>
+    <button class="quiz-option" data-key="b">排序会让编号字符串变得非常长</button>
+    <button class="quiz-option" data-key="c">去重会明显增加模型调用费用</button>
+    <button class="quiz-option" data-key="d">编号必须与对应的文件名完全一致</button>
+    <p class="feedback"
+       data-correct="对。编号是"模型的引用"和"原文 chunk"之间的对照表，动了它，溯源链就断了。"
+       data-wrong="再想想图 2 那条链：编号一动，用户点开看到的就不是那篇原文了。"></p>
+  </div>
+
+  <div class="quiz" data-answer="a">
+    <p class="q">4. 遇到未知 `style` 时，为什么直接报错而不是回退到默认风格？</p>
+    <button class="quiz-option" data-key="a">静默回退会让错误一路藏到最后才被发现</button>
+    <button class="quiz-option" data-key="b">直接报错能让整个程序运行得更快一些</button>
+    <button class="quiz-option" data-key="c">回退到默认风格会消耗更多的模型 token</button>
+    <button class="quiz-option" data-key="d">抛出异常是 Python 语言对函数的强制要求</button>
+    <p class="feedback"
+       data-correct="对。你会以为在评测 A 风格，其实跑的是 B 风格——数据全废，还毫不知情。"
+       data-wrong="再想想：报错只花一秒修，静默错误可能骗你三天。"></p>
+  </div>
+
+  <h2>十一、想深入时读这个</h2>
+  <p><strong>首选一手资源：</strong><a href="https://help.aliyun.com/zh/model-studio/use-cases/prompt-engineering-guide">阿里云百炼官方文档 · 文生文 Prompt 指南</a>（官方中文）——讲了 Prompt 框架（背景 / 目的 / 风格 / 语气 / 受众 / 输出）和"模糊 → 清晰"的改造方法，可以拿它反推本课三段提示词的写法。</p>
+  <p class="muted">完整资源见 <a href="../RESOURCES.md">RESOURCES.md</a>。</p>
+
+  <div class="foot">
+    不清楚就直接问，比如"为什么拒答要给标准话术""提示词长度会不会影响评测公平"。我是你的老师，问多基础都可以。
+  </div>
+
+</div>
+<script src="../assets/quiz.js"></script>
+</body>
+</html>

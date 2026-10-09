@@ -1,0 +1,174 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>课程 0001 · 从空文件夹到跑起来：拆解 T0</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+<div class="wrap">
+
+  <p class="eyebrow">课程 0001 · RAG 项目实战 · 对应任务 T0</p>
+  <h1>从空文件夹到跑起来：拆解 T0</h1>
+  <p class="lede">这一课不教你 Python 语法，教的是<strong>顺序</strong>——拿到一段规格说明后，先做什么、再做什么、每写完一步怎么验证。T0（项目骨架）小到能一次讲透，又刚好把这套顺序完整走一遍。</p>
+
+  <div class="note">
+    <span class="label">先读前置课</span>
+    如果下面的语法或工程概念看不懂（类型注解、类、<code>@dataclass</code>、<code>.env</code>、日志…），先读 <a href="0002-reading-t0-code.html">前置课：读懂 T0 的每一行</a>。本课假设你已能读顺代码，只讲"顺序与方法"。
+  </div>
+
+  <div class="win">
+    <strong>学完你能做到：</strong>拿到 spec 的一个小节，不靠抄，独立把模块骨架写出来并跑通验收；并且能说清每一步<em>为什么</em>这么排。
+    <br><span class="muted">配套速查卡：<a href="../reference/t0-skeleton-checklist.html">T0 骨架速查卡</a></span>
+  </div>
+
+  <h2>一、你不是"不会写"，是"不知道顺序"</h2>
+  <p>照抄能跑、从零就卡——这个差距几乎所有人都会遇到。原因不在语法，而在于：抄的时候答案是现成的；从零写的时候，你要<strong>同时</strong>决定四件事——</p>
+  <ul>
+    <li>一共要有哪些文件？</li>
+    <li>每个文件里放什么？</li>
+    <li>先写哪一个？</li>
+    <li>怎么知道这一个写对了？</li>
+  </ul>
+  <p>四件事挤在一起，大脑就死机了。新手的本能是"先把整个项目想清楚再动手"，结果永远停在第一步。</p>
+  <p>破解方法很反直觉：<strong>不要试图一次想清楚，而是固定一个顺序，让每一步只回答一个问题。</strong>顺序本身就是方法。</p>
+
+  <h2>二、四步法（这一课真正要带走的）</h2>
+  <ol class="steps">
+    <li>
+      <strong>先把规格变成清单，一个字代码都不写。</strong><br>
+      T0 的 spec 给了字段名、类型、默认值（§7.1）和数据类（§7.2）。你要做的只是把它抄成一张表。这一步看起来"没技术含量"，却决定了后面 80% 的返工——因为返工几乎都来自"没读全就开写"。
+    </li>
+    <li>
+      <strong>画出依赖箭头，从"没人依赖它"的文件开始写。</strong><br>
+      判断标准只有一个：<em>这个文件 import 了谁？</em>谁都不 import 的，最先写。<span class="muted">（T0 的顺序：<code>models</code> → <code>config</code> → <code>logging_conf</code> → <code>__init__</code>）</span><br>
+      为什么？因为这样每个文件写完都能<strong>立刻单独验证</strong>，不会被"还没写完的代码"拖住。反过来从入口 <code>__init__.py</code> 开写，你会立刻陷入"它要调用还不存在的东西"的死循环。
+    </li>
+    <li>
+      <strong>一次只写一个文件，写完立刻用一行命令验证。</strong><br>
+      反馈环越紧越好。写完 <code>config.py</code> 马上跑一句 <code>python -c "..."</code> 看输出对不对。出错时你只改了一个文件，排查范围极小。写完四个文件再一起测，一旦报错，你根本不知道是哪一步的锅。
+    </li>
+    <li>
+      <strong>最后才把整体连起来跑最终验收。</strong><br>
+      跑 <code>python -c "import kbqa"</code>。这时如果失败，问题几乎一定出在"集成"这一层（比如 <code>__init__.py</code> 里的顺序写反了），而不是某一行逻辑——排查方向是明确的。
+    </li>
+  </ol>
+
+  <div class="note">
+    <span class="label">记住这一句</span>
+    从叶子往根写，而不是从入口往叶子写。这是新手到"能自己动手"最省力的一次跨越。
+  </div>
+
+  <h2>三、T0 实战：每个文件"为什么"这么写</h2>
+  <p>先看全貌——四个文件、各自职责、以及它依赖谁（依赖谁决定了书写顺序）：</p>
+
+  <table>
+    <thead>
+      <tr><th>写的顺序</th><th>文件</th><th>它负责什么</th><th>它依赖谁</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>1</td><td><code>models.py</code></td><td>定义数据结构（Document / Chunk…）</td><td>无</td></tr>
+      <tr><td>2</td><td><code>config.py</code></td><td>把 <code>.env</code> 读成一个配置对象</td><td>pydantic-settings</td></tr>
+      <tr><td>3</td><td><code>logging_conf.py</code></td><td>统一日志的格式与级别</td><td>config</td></tr>
+      <tr><td>4</td><td><code>__init__.py</code></td><td>把日志初始化一次</td><td>logging_conf</td></tr>
+    </tbody>
+  </table>
+
+  <h3>1. <code>models.py</code>：为什么它必须是第一个</h3>
+  <p>打开它你会看到，顶部只有三行 import：<code>dataclass</code>、<code>datetime</code>、<code>pathlib</code>——全是标准库，<strong>没有一行 import 本项目其他文件</strong>。这就是"最底层"的定义。</p>
+  <p>再看为什么用 <code>@dataclass</code>：它只是给"一坨字段"起个名字，Python 会自动帮你生成 <code>__init__</code>。用它的理由是<strong>不需要行为</strong>——这些对象只用来装数据。如果它带业务逻辑，就该换成普通类；如果它只是几个字段，dataclass 是性价比最高的选择。</p>
+  <pre><code>@dataclass
+class SearchResult:
+    chunk: Chunk
+    score: float   # cosine similarity, [-1, 1]
+    rank: int</code></pre>
+
+  <h3>2. <code>config.py</code>：三个"为什么"</h3>
+  <p>这是 T0 里最值得琢磨的文件。</p>
+  <p><strong>① 为什么 <code>dashscope_api_key: str</code> 后面什么都不给？</strong><br>
+  其他字段都写了默认值（如 <code>chat_model: str = "qwen-plus"</code>），偏偏密钥没有。这是故意的：没有默认值 = <em>缺它就直接报错</em>。这叫 <strong>fail fast（尽早失败）</strong>——宁可启动时立刻崩，也不要带着一个空的密钥继续跑，然后在某个深夜以一个莫名其妙的 <code>401</code> 收场。这背后是工程原则"配置外置"：配置不该写死在代码里，密钥更不该进版本库（见 <a href="https://12factor.net/zh_cn/config">12-Factor App · 配置（中文）</a>）。</p>
+  <p><strong>② 为什么字段名是小写，而 <code>.env</code> 里是大写？</strong><br>
+  pydantic-settings 默认<strong>大小写不敏感</strong>，所以 <code>.env</code> 的 <code>CHAT_MODEL</code> 会自动填到 <code>chat_model</code>。你不必手写转换。</p>
+  <p><strong>③ 为什么最后要写一句 <code>settings = Settings()</code>？</strong><br>
+  这是<strong>模块级单例</strong>：整个项目共用一份配置。如果每个模块各自 <code>Settings()</code>，就会出现"这里读到的模型名和那里不一样"的诡异 bug。一个项目一份配置，是惯例（见 <a href="https://fastapi.tiangolo.com/zh/advanced/settings/">FastAPI 的写法（中文）</a>）。</p>
+
+  <h3>3. <code>logging_conf.py</code>：为什么集中配一次</h3>
+  <p>如果每个文件自己配日志格式，你会看到同一份日志有五种长相。所以规则是：<strong>格式只在一个地方定义，各模块只用 <code>logging.getLogger(__name__)</code> 取自己的 logger</strong>。这也是项目规范 §18.2 的要求。</p>
+
+  <h3>4. <code>__init__.py</code>：为什么只有一行</h3>
+  <p>放一句话——初始化日志。为什么放这？因为只要有人 <code>import kbqa</code>，这行就自动执行，日志就统一好了。但如果它顺手 import 了一堆业务模块，那么每 import 一次包，就会连带加载可能很重的东西。包入口越轻越好。</p>
+
+  <h2>四、亲手做一遍（重点）</h2>
+  <p>看懂 ≠ 会写。下面三个练习都要你真的动手，做完再往下看。</p>
+
+  <div class="note">
+    <span class="label">练习 A · 先猜后验</span>
+    先<strong>不要</strong>看 <code>kbqa/config.py</code>。打开 <code>docs/spec.md</code> §7.1，把 <code>Settings</code> 的字段名、类型、默认值抄成一张三列表。抄完再对照真实文件，数一数漏了几个、错了几个。<br>
+    <span class="muted">目的：体会"规格 → 清单"这一步有多机械、又有多容易漏。</span>
+  </div>
+
+  <div class="note">
+    <span class="label">练习 B · 破坏它，理解 fail fast</span>
+    把 <code>config.py</code> 里这一行临时改成带默认值的形式：<br>
+    <code>dashscope_api_key: str = "sk-please-set-me"</code><br>
+    然后在<strong>没有</strong> <code>.env</code>、也没有环境变量的情况下去 import，观察它是否<em>不再报错</em>。想一想：这种"能跑起来但配置是错的"状态，会在项目的哪个环节给你埋雷？想清楚后把改动还原。
+  </div>
+
+  <div class="note">
+    <span class="label">练习 C · 亲手跑一次反馈环</span>
+    在项目根目录逐个执行（PowerShell）：
+    <pre><code>python -c "import kbqa; print('ok')"
+python -c "from kbqa.config import settings; print(settings.chat_model, settings.embedding_dim)"
+python -c "import logging, kbqa; logging.getLogger('kbqa').info('test')"</code></pre>
+    第一条对应"models 能加载"，第二条对应"config 读对了"，第三条对应"日志格式对了"。<strong>每一条都是一个小到不能再小的验收</strong>——这就是第 3 步说的紧反馈环。
+    <br><span class="muted">提示：没有 <code>.env</code> 时，可临时用 <code>$env:DASHSCOPE_API_KEY='sk-test'</code> 让配置能加载。</span>
+  </div>
+
+  <h2>五、自测（凭记忆答，别翻上面）</h2>
+
+  <div class="quiz" data-answer="b">
+    <p class="q">1. 从零写一个模块时，应该先写哪个文件？</p>
+    <button class="quiz-option" data-key="a">最先被其他模块导入的那个文件</button>
+    <button class="quiz-option" data-key="b">不被任何模块依赖的最底层文件</button>
+    <button class="quiz-option" data-key="c">项目里最关键最核心的那个文件</button>
+    <button class="quiz-option" data-key="d">报错信息里最先出现的那个文件</button>
+    <p class="feedback"
+       data-correct="对。底层文件不 import 项目内任何东西，写完就能立刻单独验证。"
+       data-wrong="再想想：判断标准只有一个——这个文件 import 了谁。谁都不 import 的，最先写。"></p>
+  </div>
+
+  <div class="quiz" data-answer="b">
+    <p class="q">2. 写完一个文件后，最该立刻做什么？</p>
+    <button class="quiz-option" data-key="a">紧接着开始写下一个文件</button>
+    <button class="quiz-option" data-key="b">用最小命令立刻验证它</button>
+    <button class="quiz-option" data-key="c">回过头给这个文件补注释</button>
+    <button class="quiz-option" data-key="d">先把四个文件全写完再说</button>
+    <p class="feedback"
+       data-correct="对。反馈环越紧，出错时排查范围越小——你只动了一个文件。"
+       data-wrong="再想想：这一课反复强调的，是让反馈环尽可能紧。"></p>
+  </div>
+
+  <div class="quiz" data-answer="b">
+    <p class="q">3. T0 里 <code>dashscope_api_key</code> 故意不给默认值，最主要的原因是什么？</p>
+    <button class="quiz-option" data-key="a">密钥的格式没法用代码去校验</button>
+    <button class="quiz-option" data-key="b">缺少密钥就该在启动时立刻报错</button>
+    <button class="quiz-option" data-key="c">有默认值就容易被提交进仓库</button>
+    <button class="quiz-option" data-key="d">pydantic 写不了字符串默认值</button>
+    <p class="feedback"
+       data-correct="对。fail fast：宁可启动即崩，也不要带着错配置跑到深夜才炸。"
+       data-wrong="再想想：这是 fail fast 的思路——问题要在离它最近的地方暴露。"></p>
+  </div>
+
+  <h2>六、想深入时读这个</h2>
+  <p><strong>首选一手资源：</strong><a href="https://docs.python.org/zh-cn/3/tutorial/modules.html">Python 官方教程 · 6. 模块（官方中文）</a>。它权威解释了"模块/包/import"到底怎么回事——这正是你今天在 T0 里第一次遇到的东西。读第 6 章即可，约 20 分钟。</p>
+  <p class="muted">更多资源见 <a href="../RESOURCES.md">RESOURCES.md</a>；本课速查卡见 <a href="../reference/t0-skeleton-checklist.html">T0 骨架速查卡</a>。本课目标来自 <a href="../MISSION.md">MISSION.md</a>。</p>
+
+  <div class="foot">
+    有任何不清楚的地方——比如"fail fast 到底好不好"、"为什么 dataclass 能自动生成 <code>__init__</code>"——直接问我。我是你的老师，可以就任何一个点展开或再出练习题。
+  </div>
+
+</div>
+<script src="../assets/quiz.js"></script>
+</body>
+</html>

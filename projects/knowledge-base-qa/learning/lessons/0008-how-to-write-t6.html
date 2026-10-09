@@ -1,0 +1,166 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>课程 0008 · 把外部依赖"包起来"：拆解 T6</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+<div class="wrap">
+
+  <p class="eyebrow">课程 0008 · RAG 项目实战 · 对应任务 T6</p>
+  <h1>把外部依赖"包起来"：拆解 T6</h1>
+  <p class="lede">T6 的代码很短，但它是本项目<strong>第一次出现"抽象"</strong>。抽象不是炫技——它解决一个很具体的问题：<strong>换模型时，你希望改几个地方？</strong></p>
+
+  <div class="win">
+    <strong>学完你能做到：</strong>看懂"协议 + 工厂"这套结构为什么值得写，并知道怎么把外部 SDK 的异常"翻译"成自己项目能稳定处理的形状。
+    <br><span class="muted">配套：<a href="../reference/python-concepts-glossary.html">术语表</a> · 前置 <a href="0002-reading-t0-code.html">0002</a> / <a href="0003-how-to-write-t1.html">0003</a></span>
+  </div>
+
+  <h2>一、两个抽象：协议 + 工厂</h2>
+  <p>T6 只干一件事：把 <code>messages</code> 交给模型，拿回文本。但它包了三样东西：</p>
+  <pre><code>class LLMProvider(Protocol):          # 只约定"能干什么"
+    def chat(self, messages, temperature=None) -> str: ...
+
+class DashScopeChat:                  # 一个具体实现
+    def chat(...): ...
+
+def get_llm(settings) -> LLMProvider: # 唯一的创建入口
+    return DashScopeChat(settings)</code></pre>
+
+  <table>
+    <thead><tr><th>结构</th><th>作用</th></tr></thead>
+    <tbody>
+      <tr><td><code>Protocol</code></td><td>只描述"有哪些方法、什么签名"，不规定怎么实现。业务代码只依赖它</td></tr>
+      <tr><td>工厂函数</td><td>集中创建逻辑。要换实现（比如换成别的厂商），只改这一处</td></tr>
+    </tbody>
+  </table>
+  <p>好处很实在：以后你想把 <code>qwen-plus</code> 换成别的模型/厂商，<strong>只需要新写一个类 + 改工厂一行</strong>，pipeline、API、前端全都不用动。这就是 spec NFR-2「可替换」的落地。</p>
+  <p class="muted">回头看你会发现：<code>embeddings.py</code> / <code>rerank.py</code> / <code>llm.py</code> 三个模块长得几乎一样——这不是巧合，是同一套套路重复用。<strong>看到"第三次写同样的结构"，就该抽象它了。</strong></p>
+
+  <h2>二、坑 3：思考模式</h2>
+  <p>这是本任务唯一一个"不看文档必踩"的坑。官方文档写得很直白：</p>
+  <blockquote>
+    <p>千问 3.8 / 3.7 / 3.6 / 3.5 系列模型<strong>默认开启思考模式</strong>。建议使用混合思考模型时，<strong>显式设置 <code>enable_thinking</code> 参数</strong>（<code>true</code> 开启 / <code>false</code> 关闭）。</p>
+  </blockquote>
+  <p>开启思考模式会发生两件坏事：</p>
+  <ul>
+    <li><strong>更慢更贵</strong>：多出一段推理过程要计费</li>
+    <li><strong>答案可能"不见了"</strong>：思考过程放在 <code>reasoning_content</code> 字段，正文放在 <code>content</code>——RAG 场景下你拿到 <code>content</code> 可能是空的</li>
+  </ul>
+  <p>所以代码里必须显式关掉（它<strong>不是</strong> OpenAI 标准参数，得走 <code>extra_body</code>）：</p>
+  <pre><code>extra_body={"enable_thinking": False}</code></pre>
+
+  <h3>再加一道防御</h3>
+  <p>光传参数还不够——万一哪天换了模型、或配置被人改成 <code>true</code>，你得<strong>立刻知道</strong>，而不是把空字符串一路传下去变成"模型答不出来"。所以：</p>
+  <pre><code>if not content:
+    logger.error("模型返回空 content（enable_thinking=%s），请检查是否误开了思考模式", ...)
+    raise LLMError("模型返回空 content，可能是思考模式未关闭", "empty_content")</code></pre>
+  <p class="muted">空字符串是最危险的返回——它不会报错，只会让上层"以为模型不想回答"。<strong>能报错的地方就该报错。</strong></p>
+
+  <h2>三、给异常"翻译"一层</h2>
+  <p>调用外部服务会失败：key 错、额度用完、地域不对……这些错误由 SDK 抛出来，但<strong>SDK 的异常形状不属于你的项目</strong>。上层（T10 的 API）需要的是稳定的 <code>{code, message}</code>（§8 要求透传百炼的 code）。</p>
+  <p>所以在边界上做一次翻译：</p>
+  <pre><code>try:
+    ...
+except Exception as exc:
+    code = _error_code(exc)                      # 从各种形状里挖出百炼的 code
+    raise LLMError(f"LLM 调用失败 code={code}：{exc}", code) from exc</code></pre>
+  <p>好处：调用方只需要 <code>except LLMError</code>，并且 <code>exc.code</code> 直接可用。实测拿到的错误是 <code>invalid_api_key</code>——这条信息直接告诉你"key 不对"，而不是让你去猜一个 401。</p>
+  <p class="muted">看见最后那个 <code>from exc</code> 了吗？这叫异常链——它保留了原始异常，排查时能看到完整堆栈，不会"翻译"完就丢掉线索。</p>
+
+  <h2>四、一个容易忽略的细节：temperature 的默认值</h2>
+  <p>spec 的签名写的是 <code>chat(messages, temperature=0.0)</code>。但如果真的写死 <code>0.0</code>，那么 <code>.env</code> 里的 <code>CHAT_TEMPERATURE</code> 就<strong>永远不生效</strong>——它变成了一个"改了没反应"的摆设。</p>
+  <p>所以这里改成：</p>
+  <pre><code>temperature: float | None = None      # None 表示"用配置里的 chat_temperature"</code></pre>
+  <p>默认行为仍是 0.0（配置默认值就是 0.0，满足 NFR-4 可复现），但<strong>配置真的能被配置</strong>。</p>
+  <div class="note">
+    <span class="label">一条通用原则</span>
+    凡是暴露到 <code>.env</code> 的配置项，<strong>都要确认它在代码里真的被读到了</strong>。否则它就是在骗未来的你。
+  </div>
+
+  <h2>五、实测数据</h2>
+  <table>
+    <thead><tr><th>验收点</th><th>实测</th></tr></thead>
+    <tbody>
+      <tr><td>传入 messages 返回非空字符串</td><td>✅ 返回 100 字答案，模型 <code>qwen-plus</code>，耗时 1574ms</td></tr>
+      <tr><td>请求体确实带上 <code>extra_body</code></td><td>✅ <code>{'enable_thinking': False}</code></td></tr>
+      <tr><td>错误 API Key → 抛异常且含百炼 code</td><td>✅ <code>LLMError</code>，<code>code=invalid_api_key</code>，异常信息里也含该 code</td></tr>
+      <tr><td>显式 temperature 覆盖默认值</td><td>✅ 传 0.7 → 请求里就是 0.7</td></tr>
+    </tbody>
+  </table>
+  <p class="muted">注：这次验证脚本是写成 <code>.py</code> 文件跑的——因为课程 0007 那个教训。</p>
+
+  <h2>六、亲手做一遍</h2>
+  <div class="note">
+    <span class="label">练习 A · 亲手看见 extra_body</span>
+    写几行代码，把 <code>llm._client.chat.completions.create</code> 临时换成一个会记录参数的函数，调用一次 <code>chat()</code>，打印收到的 <code>extra_body</code>。想清楚：如果不打印，你怎么确认参数真的传上去了？
+  </div>
+  <div class="note">
+    <span class="label">练习 B · 亲手制造一次"假失败"</span>
+    把 <code>.env</code> 里的 <code>CHAT_ENABLE_THINKING</code> 改成 <code>true</code>，把模型改成 <code>qwen3.7-plus</code>（默认开思考），跑一次，观察是不是真的可能出现空 <code>content</code> 或明显变慢。看完记得改回来。
+  </div>
+  <div class="note">
+    <span class="label">练习 C · 想清楚一个设计题</span>
+    如果 <code>llm.py</code> 不包 <code>LLMError</code>、直接把 SDK 的异常抛出去，T10 的 API 层要写多少种 <code>except</code>？维护成本差在哪？
+  </div>
+
+  <h2>七、自测（凭记忆答）</h2>
+
+  <div class="quiz" data-answer="a">
+    <p class="q">1. 为什么要有 LLMProvider 协议和 get_llm 工厂？</p>
+    <button class="quiz-option" data-key="a">换模型实现时只需要改工厂一处</button>
+    <button class="quiz-option" data-key="b">能让程序运行的整体速度变得更快</button>
+    <button class="quiz-option" data-key="c">能自动降低调用模型的接口费用</button>
+    <button class="quiz-option" data-key="d">能把接口异常自动转换成文本</button>
+    <p class="feedback"
+       data-correct="对。业务代码只依赖 Protocol，换实现只改工厂一行——这就是 NFR-2 可替换。"
+       data-wrong="再想想：抽象的目的是把"变化"收进一个地方。"></p>
+  </div>
+
+  <div class="quiz" data-answer="a">
+    <p class="q">2. 为什么必须显式传 <code>enable_thinking=False</code>？</p>
+    <button class="quiz-option" data-key="a">否则正文可能为空且多花时间和费用</button>
+    <button class="quiz-option" data-key="b">否则模型会直接拒绝回答这个问题</button>
+    <button class="quiz-option" data-key="c">否则接口会返回 404 状态码与错误</button>
+    <button class="quiz-option" data-key="d">否则向量维度会与配置里的不一致</button>
+    <p class="feedback"
+       data-correct="对。部分模型默认开思考，正文可能落到 reasoning_content，content 为空，还多花钱。"
+       data-wrong="再想想：思考过程会占额外 token，还可能把正文挤到另一个字段里。"></p>
+  </div>
+
+  <div class="quiz" data-answer="a">
+    <p class="q">3. 为什么要把 SDK 异常包成自己的 <code>LLMError</code>？</p>
+    <button class="quiz-option" data-key="a">为了把百炼的错误码稳定地带给上层</button>
+    <button class="quiz-option" data-key="b">为了减小异常对象本身占用的体积</button>
+    <button class="quiz-option" data-key="c">为了让异常不再继续向上层抛出去</button>
+    <button class="quiz-option" data-key="d">为了把上游的错误码统一改写成为200</button>
+    <p class="feedback"
+       data-correct="对。上层只需要 except LLMError 并读 exc.code，不用去适配各种 SDK 异常形状。"
+       data-wrong="再想想：外部异常的"形状"不该由业务代码去猜，要在边界上翻译一次。"></p>
+  </div>
+
+  <div class="quiz" data-answer="a">
+    <p class="q">4. 为什么 temperature 的默认值用配置而不是写死 0.0？</p>
+    <button class="quiz-option" data-key="a">否则那个配置项改了也不会有任何效果</button>
+    <button class="quiz-option" data-key="b">否则接口会直接拒绝掉这一次的请求</button>
+    <button class="quiz-option" data-key="c">否则模型一定会返回空白的字符串</button>
+    <button class="quiz-option" data-key="d">否则重排阶段的分数计算会变得不准</button>
+    <p class="feedback"
+       data-correct="对。凡是暴露到 .env 的配置，都必须确认代码里真的读到了它。"
+       data-wrong="再想想：一个改了没反应的配置项，等于在骗未来的自己。"></p>
+  </div>
+
+  <h2>八、想深入时读这个</h2>
+  <p><strong>首选一手资源：</strong><a href="https://help.aliyun.com/zh/model-studio/deep-thinking">阿里云百炼官方文档 · 深度思考</a>——中文原生，讲清了"哪些模型默认开思考""<code>reasoning_content</code> 与 <code>content</code> 分别放什么"，正是本课坑 3 的出处。</p>
+  <p class="muted">接口参数速查见 <a href="https://help.aliyun.com/zh/model-studio/qwen-api-via-openai-chat-completions">OpenAI 兼容 · Chat</a>；完整资源见 <a href="../RESOURCES.md">RESOURCES.md</a>。</p>
+
+  <div class="foot">
+    不清楚就直接问，比如"Protocol 和抽象基类有什么区别""异常链 <code>from exc</code> 到底保留了啥"。我是你的老师，问多基础都可以。
+  </div>
+
+</div>
+<script src="../assets/quiz.js"></script>
+</body>
+</html>

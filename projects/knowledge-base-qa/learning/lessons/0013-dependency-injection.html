@@ -1,0 +1,300 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>课程 0013 · 解耦：从协议到依赖注入</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+<div class="wrap">
+
+  <p class="eyebrow">课程 0013 · RAG 项目实战 · 概念补课（T9 延伸）</p>
+  <h1>解耦：从协议到依赖注入</h1>
+  <p class="lede">课程 0009 讲了"协议"和"工厂"，这一课补上最后一块——<strong>依赖注入</strong>。三者其实是一条线上的三个环节，服务的都是同一件事：<strong>让"变化"只影响一个地方。</strong></p>
+
+  <div class="win">
+    <strong>学完你能做到：</strong>看懂 <code>RAGPipeline</code> 的构造函数为什么长那样；判断哪些东西"该注入"、哪些"不该"；并知道这台"可插拔的机器"是怎么被装配起来的。
+    <br><span class="muted">配套：<a href="../reference/python-concepts-glossary.html">术语表</a> · 前置 <a href="0009-protocol-factory-adapter.html">课程 0009</a> / <a href="0011-how-to-write-t8.html">课程 0011</a></span>
+  </div>
+
+  <h2>一、先搞清楚"自己 new"是什么</h2>
+  <p>"new" 是 Java/C++ 的说法。在 Python 里，<strong>"自己 new"就是你在代码里亲手写一个构造函数调用、造出一个对象</strong>：</p>
+  <pre><code>self._llm = DashScopeChat(settings)                  # ← 这就是"自己 new"
+self._store = VectorStore(settings.data_dir / "index")</code></pre>
+  <p>那个括号，就是在"造东西"。</p>
+  <p>所以"不自己在内部 new 依赖"这句话，翻译过来就是：<strong>pipeline 内部不要出现 <code>DashScope...(...)</code> 这种调用。</strong></p>
+
+  <h2>二、两种写法并排看</h2>
+  <h3>写法 A：自己 new（耦合写法）</h3>
+  <pre><code>class RAGPipeline:
+    def __init__(self, settings):
+        self._settings = settings
+        self._store = VectorStore(settings.data_dir / "index")         # 自己造
+        self._embedder = DashScopeEmbedding(settings)                  # 自己造
+        self._reranker = DashScopeRerank(settings) if ... else None     # 自己造
+        self._llm = DashScopeChat(settings)                            # 自己造</code></pre>
+
+  <h3>写法 B：注入（本项目写法）</h3>
+  <pre><code>class RAGPipeline:
+    def __init__(self, settings, store, embedder, reranker, llm):
+        self._settings = settings
+        self._store = store        # 别人造好递给我
+        self._embedder = embedder
+        self._reranker = reranker
+        self._llm = llm</code></pre>
+
+  <div class="note">
+    <span class="label">区别只有一句话</span>
+    <strong>谁来决定"用哪个实现"？</strong>
+    <br>写法 A：在 <code>pipeline.py</code> <strong>内部</strong>（写死了）。
+    <br>写法 B：在<strong>调用方</strong>（外部递进来）。
+  </div>
+  <p><strong>"依赖注入"这个名字就是这么来的</strong>：pipeline 依赖的那几样东西，不是它自己造的，而是被<strong>从外部注入</strong>进来的。</p>
+  <p class="muted">注意：Python 里它<strong>没有任何特殊语法</strong>——就是"把参数写进构造函数"。不需要框架、不需要注解。</p>
+
+  <div class="diagram">
+    <div class="dbox"><strong>写法 A · 自己 new</strong><span>pipeline 内部焊死了具体实现</span></div>
+    <div class="darrow">↓ 对比</div>
+    <div class="dbox lead"><strong>写法 B · 注入</strong><span>pipeline 只接住外部递来的组件</span></div>
+    <div class="dcap">图 1 · 差别不在"写法好不好看"，而在"决定权在谁手里"</div>
+  </div>
+
+  <h2>三、它背后的思想：控制反转</h2>
+  <p>依赖注入不是目的，它服务的是一句话：<strong>控制权反转</strong>。</p>
+  <table>
+    <thead><tr><th></th><th>谁说了算</th></tr></thead>
+    <tbody>
+      <tr><td>以前</td><td>pipeline 说"我要用百炼"（内部决定）</td></tr>
+      <tr><td>现在</td><td>调用方说"我给你用这个"（外部决定）</td></tr>
+    </tbody>
+  </table>
+  <p>把"选择权"从内部挪到外部，你就得到了一个<strong>可配置、可替换、可测试</strong>的组件。</p>
+
+  <h2>四、三个场景，看差别到底在哪</h2>
+
+  <h3>场景 1：想把向量模型从百炼换成别的</h3>
+  <table>
+    <thead><tr><th></th><th>要做什么</th></tr></thead>
+    <tbody>
+      <tr><td>写法 A</td><td>打开 <code>pipeline.py</code>，找到那行 <code>DashScopeEmbedding(settings)</code> 改掉 —— <strong>改动核心文件，可能影响别处</strong></td></tr>
+      <tr><td>写法 B</td><td>在 Notebook / API 层把 <code>get_embedding_provider(settings)</code> 换成 <code>本地Embedding()</code> —— <strong>pipeline.py 一个字不动</strong></td></tr>
+    </tbody>
+  </table>
+
+  <h3>场景 2：想写测试</h3>
+  <table>
+    <thead><tr><th></th><th>要做什么</th></tr></thead>
+    <tbody>
+      <tr><td>写法 A</td><td>测试一跑就<strong>真的去连百炼</strong> —— 花钱、要联网、慢、网络抖一下测试就红了</td></tr>
+      <tr><td>写法 B</td><td>塞一个假 embedder，返回固定向量 —— <strong>0.01 秒跑完、零成本、零网络</strong></td></tr>
+    </tbody>
+  </table>
+  <pre><code>class 假embedder:
+    dim = 1024
+    def embed(self, texts): return [[0.1] * 1024 for _ in texts]
+
+pipeline = RAGPipeline(settings, store, 假embedder(), None, 假llm())</code></pre>
+  <p class="muted">这就是课程 0009"练习 A"那个假模型实验真正的用武之地。</p>
+
+  <h3>场景 3：做消融实验（关掉重排）</h3>
+  <table>
+    <thead><tr><th></th><th>要做什么</th></tr></thead>
+    <tbody>
+      <tr><td>写法 A</td><td>把那行 <code>self._reranker = ...</code> 注释掉，跑完再改回来（<strong>一不小心就提交上去了</strong>）</td></tr>
+      <tr><td>写法 B</td><td><code>pipeline.retrieve(q, None, use_rerank=False)</code> —— 一个参数</td></tr>
+    </tbody>
+  </table>
+
+  <h2>五、本项目的"铁证"</h2>
+  <p>最能说明问题的是 <code>pipeline.py</code> 的 import 那几行：</p>
+  <pre><code>from kbqa.embeddings import EmbeddingProvider      # ← 接口（协议）
+from kbqa.llm import LLMProvider                   # ← 接口（协议）
+from kbqa.rerank import RerankProvider             # ← 接口（协议）</code></pre>
+  <div class="note">
+    <span class="label">看清楚这一点</span>
+    <code>DashScopeEmbedding</code>、<code>DashScopeChat</code>、<code>DashScopeRerank</code> 这三个<strong>具体实现类，pipeline.py 一个都没 import</strong>。
+    <br><br>也就是说——<strong>pipeline 根本不认识"百炼"。</strong>它只知道"有个人能满足这个形状"。谁是那个人、从哪来，它不关心、也没法关心。
+    <br><br>这就是"解耦"最直白的样子：<strong>编排层不认识任何具体实现。</strong>
+  </div>
+
+  <h2>六、一个类比：打印机与墨盒</h2>
+  <table>
+    <thead><tr><th></th><th>类比</th><th>结果</th></tr></thead>
+    <tbody>
+      <tr><td>自己 new</td><td>墨盒<strong>焊死</strong>在打印机里</td><td>想换颜色？拆机器。想修？把整台搬走</td></tr>
+      <tr><td>依赖注入</td><td>墨盒<strong>可插拔</strong></td><td>想换颜色？拔下来插一个。想试墨盒好不好？拿个假的插上</td></tr>
+    </tbody>
+  </table>
+  <p><code>RAGPipeline</code> 现在就是那台<strong>只认"墨盒形状"的打印机</strong>——它甚至不知道插进来的到底是不是原厂的。</p>
+
+  <h2>七、⚠️ 别过度：什么才算"会变"？</h2>
+  <p>"注入会变的东西，不要注入固定的东西"这句话太抽象。先换一个类比。</p>
+
+  <div class="note">
+    <span class="label">类比：手机与 SIM 卡</span>
+    你会<strong>换运营商</strong>，所以 SIM 卡做成<strong>可插拔</strong>的；你不会<strong>天天换屏幕</strong>，所以屏幕<strong>焊死</strong>在机器里。
+    <br><br>
+    所以判断标准不是"它理论上会不会变"，而是——<strong>现实中会不会有人真的想把它换掉？</strong>
+  </div>
+
+  <h3>项目里的"SIM 卡"和"屏幕"</h3>
+  <table>
+    <thead><tr><th>东西</th><th>是什么</th><th>为什么</th></tr></thead>
+    <tbody>
+      <tr><td><code>embedder</code></td><td>SIM 卡 → 注入</td><td>可能从百炼换成本地模型；测试时要换成假的</td></tr>
+      <tr><td><code>llm</code></td><td>SIM 卡 → 注入</td><td>评测时要换模型对比；测试时绝不该真的掏钱调模型</td></tr>
+      <tr><td><code>store</code></td><td>SIM 卡 → 注入</td><td>数据目录可能变；测试想用临时目录</td></tr>
+      <tr><td><code>settings</code></td><td>SIM 卡 → 注入</td><td>换环境（开发 / 生产）就不一样</td></tr>
+      <tr><td><code>_CITATION_RE</code></td><td>屏幕 → 焊死</td><td>"引用长什么样"是项目定死的规则，没有第二个版本</td></tr>
+      <tr><td><code>logger</code></td><td>屏幕 → 焊死</td><td>日志往哪写由 logging 统一配置，各模块只管拿来用</td></tr>
+    </tbody>
+  </table>
+
+  <h3>三个信号：命中一个就值得注入</h3>
+  <table>
+    <thead><tr><th>信号</th><th>问自己</th><th>项目的例子</th></tr></thead>
+    <tbody>
+      <tr><td>① 有第二个候选</td><td>"我明天可能换成谁？"</td><td><code>embedder</code>：百炼 / 本地模型 / 假的</td></tr>
+      <tr><td>② 测试要换成假的</td><td>"跑测试时它还该是真的吗？"</td><td><code>llm</code>：测试里不该花钱调真模型</td></tr>
+      <tr><td>③ 换个环境会变</td><td>"换台机器、换个环境还一样吗？"</td><td><code>store</code> / <code>settings</code></td></tr>
+    </tbody>
+  </table>
+  <p>反过来：<strong>三条全不中，就别注入。</strong>正则、常量、纯计算——它们没有"另一个版本"，注入只会变成噪音。</p>
+
+  <h3>过度注入长什么样</h3>
+  <p>如果把"固定的东西"也塞进构造函数，就会变成这样：</p>
+  <pre><code>class RAGPipeline:
+    def __init__(self, settings, store, embedder, reranker, llm,
+                 citation_re, logger, json_dumps, perf_counter):   # ← 荒谬
+        ...</code></pre>
+  <p>调用方于是得这么写：</p>
+  <pre><code>RAGPipeline(..., citation_re=re.compile(r"\[(\d+)\]"),
+            logger=logging.getLogger("x"),
+            json_dumps=json.dumps,
+            perf_counter=time.perf_counter)</code></pre>
+  <p>这些东西<strong>从来不会换</strong>。把它们做成参数，唯一的效果是——<strong>每个想用 pipeline 的人，都得先搞清楚这 4 个毫不重要的东西该传什么。</strong></p>
+
+  <div class="note">
+    <span class="label">一句话</span>
+    <strong>注入"别人可能想换掉的零件"，不要注入"规则和常量"。</strong>
+    <br>口诀：<strong>有第二个版本吗？测试要换成假的吗？换个环境会变吗？—— 有一条"是"就注入，全是"否"就写死。</strong>
+  </div>
+
+  <h2>八、三件套怎么配合</h2>
+  <p>把课程 0009 和这一课连起来看，整条装配线是这样的：</p>
+  <div class="diagram">
+    <div class="dbox"><strong>① 协议</strong><span>EmbeddingProvider / LLMProvider / RerankProvider</span></div>
+    <div class="darrow">↓ 谁满足这个形状？</div>
+    <div class="drow">
+      <div class="dbox"><strong>② 适配器</strong><span>DashScopeEmbedding<br>把 SDK 包装成这个形状</span></div>
+      <div class="dbox"><strong>替身（测试）</strong><span>假embedder / 假llm<br>不联网、不花钱</span></div>
+    </div>
+    <div class="darrow">↓ 谁来选？</div>
+    <div class="dbox"><strong>③ 工厂</strong><span>get_embedding_provider / get_reranker / get_llm</span></div>
+    <div class="darrow">↓ 递给谁？（这就是"注入"）</div>
+    <div class="dbox lead"><strong>④ 编排</strong><span>RAGPipeline —— 只认形状，不认实现</span></div>
+    <div class="dcap">图 2 · 协议定形状 → 适配器实现 → 工厂选择 → 注入给编排</div>
+  </div>
+  <p class="muted">看 <a href="../../notebooks/03_qa_prompt_compare.ipynb">Notebook 03</a> 里那段装配代码，就是图 2 的文字版：</p>
+  <pre><code>pipeline = RAGPipeline(
+    settings=settings,
+    store=store,
+    embedder=get_embedding_provider(settings),   # ③ 工厂选 → ④ 注入
+    reranker=get_reranker(settings),             # 开了返回实例，关了返回 None
+    llm=get_llm(settings),
+)</code></pre>
+
+  <h2>九、亲手做一遍</h2>
+
+  <div class="note">
+    <span class="label">练习 A · 亲手塞一个假组件</span>
+    写一个 <code>假embedder</code>（只需有 <code>dim</code> 属性和 <code>embed</code> 方法），用它 + 你已有的 <code>store</code> 构造一个 pipeline，调用 <code>retrieve()</code>。观察：<strong>没有联网、没有花钱，检索照样跑完。</strong>
+  </div>
+
+  <div class="note">
+    <span class="label">练习 B · 亲手感受"改一处"</span>
+    在 Notebook 03 里，把 <code>get_embedding_provider(settings)</code> 换成一个返回假向量的工厂。问自己：<strong>这次替换，我改了 <code>pipeline.py</code> 几行？</strong>（答案：0 行。）
+  </div>
+
+  <div class="note">
+    <span class="label">练习 C · 判断该不该注入</span>
+    下面四个东西，你会注入哪几个？为什么？
+    <br>① 当前时间（<code>datetime.now()</code>）　② 一个解析引用的正则　③ 日志器　④ 数据库连接
+    <br><span class="muted">提示：用第七节的三个问题过一遍。①和④通常值得注入（测试时想控制时间 / 想换测试库），②③通常不值得。</span>
+  </div>
+
+  <div class="note">
+    <span class="label">练习 D · 想清楚一个设计题</span>
+    如果把 <code>reranker</code> 改成"在 <code>__init__</code> 里根据 <code>settings.rerank_enabled</code> 自己 new"，会失去什么？（提示：回到场景 3。）
+  </div>
+
+  <h2>十、自测（凭记忆答）</h2>
+
+  <div class="quiz" data-answer="a">
+    <p class="q">1. "自己 new" 在 Python 里指的是什么？</p>
+    <button class="quiz-option" data-key="a">在代码里直接写构造函数调用去造对象</button>
+    <button class="quiz-option" data-key="b">使用 class 关键字定义出一个新的类</button>
+    <button class="quiz-option" data-key="c">通过 import 语句引入一个新的模块</button>
+    <button class="quiz-option" data-key="d">给已有的对象动态新增一个属性字段</button>
+    <p class="feedback"
+       data-correct="对。就是写 DashScopeChat(settings) 这种"括号调用"，自己亲手造。"
+       data-wrong="再想想：new 是 Java/C++ 的说法，Python 里对应"构造函数调用"。"></p>
+  </div>
+
+  <div class="quiz" data-answer="a">
+    <p class="q">2. 依赖注入把"决定用哪个实现"的权力交给了谁？</p>
+    <button class="quiz-option" data-key="a">调用方（外部）</button>
+    <button class="quiz-option" data-key="b">被使用的模块自己</button>
+    <button class="quiz-option" data-key="c">Python 解释器</button>
+    <button class="quiz-option" data-key="d">配置文件随机决定</button>
+    <p class="feedback"
+       data-correct="对。控制权从内部挪到外部，这就是"控制反转"。"
+       data-wrong="再想想："依赖"被"注入"——是谁把它送进来的？"></p>
+  </div>
+
+  <div class="quiz" data-answer="a">
+    <p class="q">3. 下面哪一项最"应该"被注入？</p>
+    <button class="quiz-option" data-key="a">可能换成别的厂商的 embedding 实现</button>
+    <button class="quiz-option" data-key="b">一个写死在源码里的正则表达式常量</button>
+    <button class="quiz-option" data-key="c">模块级共享的 logger 对象</button>
+    <button class="quiz-option" data-key="d">一个不依赖任何外部状态的纯计算函数</button>
+    <p class="feedback"
+       data-correct="对。会变、需要在测试里替换的东西才值得注入。"
+       data-wrong="再想想：注入会变的东西，别注入固定的东西。"></p>
+  </div>
+
+  <div class="quiz" data-answer="a">
+    <p class="q">4. `pipeline.py` 只 import 协议接口、不 import `DashScope*` 具体类，这意味着什么？</p>
+    <button class="quiz-option" data-key="a">编排层不认识任何具体实现，换实现不用改它</button>
+    <button class="quiz-option" data-key="b">程序运行时一定不会用到那些具体实现类</button>
+    <button class="quiz-option" data-key="c">说明项目里其实根本没有写那些实现类</button>
+    <button class="quiz-option" data-key="d">Python 会自动帮我们在运行时选择合适的实现</button>
+    <p class="feedback"
+       data-correct="对。解耦最直白的样子：编排层只认形状，不认具体是谁。"
+       data-wrong="再想想：运行时照样用 DashScope，只是 pipeline 不需要知道这件事。"></p>
+  </div>
+
+  <div class="quiz" data-answer="a">
+    <p class="q">5. 依赖注入在本项目里最实际的好处之一是？</p>
+    <button class="quiz-option" data-key="a">测试时可以塞假组件，不联网也不花钱</button>
+    <button class="quiz-option" data-key="b">让整条问答链路的运行速度明显变快</button>
+    <button class="quiz-option" data-key="c">自动降低调用大模型时产生的费用</button>
+    <button class="quiz-option" data-key="d">让向量检索的准确率出现明显的提高</button>
+    <p class="feedback"
+       data-correct="对。性能/准确率都不受它影响——它换来的是可替换、可测试、可实验。"
+       data-wrong="再想想：注入改变的是"谁来选实现"，不是算法本身的效果。"></p>
+  </div>
+
+  <h2>十一、想深入时读这个</h2>
+  <p><strong>首选一手资源：</strong><a href="https://docs.python.org/zh-cn/3/tutorial/classes.html">Python 官方教程 · 类</a>（官方中文）——回看"实例属性"和"构造函数 <code>__init__</code>"，你会发现这一课讲的东西，语法基础全在这里，只是<strong>用法的动机</strong>需要工程经验才能体会。</p>
+  <p class="muted">完整资源见 <a href="../RESOURCES.md">RESOURCES.md</a>。</p>
+
+  <div class="foot">
+    不清楚就直接问，比如"企业里的依赖注入框架（如 Spring）和这个有什么区别""为什么有些语言必须靠框架做注入"。我是你的老师，问多基础都可以。
+  </div>
+
+</div>
+<script src="../assets/quiz.js"></script>
+</body>
+</html>

@@ -1,0 +1,172 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>课程 0007 · 结果不可思议时，先怀疑工具：拆解 T5</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+<div class="wrap">
+
+  <p class="eyebrow">课程 0007 · RAG 项目实战 · 对应任务 T5</p>
+  <h1>结果不可思议时，先怀疑工具</h1>
+  <p class="lede">T5 的代码本身很短。真正耗掉时间的，是"<strong>为什么结果不对</strong>"。这一课的重点不是 Rerank 本身，而是<strong>一套排查问题的套路</strong>——以及一个 Windows 上真实存在、会让你怀疑人生的编码陷阱。</p>
+
+  <div class="win">
+    <strong>学完你能做到：</strong>当结果"不可思议"时，不再靠猜和换方案，而是用"对照实验 + 让工具自证"两步定位到真凶。
+    <br><span class="muted">配套：<a href="../reference/python-concepts-glossary.html">术语表</a> · 前置 <a href="0004-how-to-write-t2.html">0004</a> / <a href="0006-how-to-write-t4.html">0006</a></span>
+  </div>
+
+  <h2>一、T5 在做什么</h2>
+  <p>检索分两个阶段：<strong>召回</strong>（快、粗，取 20 条）→ <strong>重排</strong>（慢、准，取 4 条）。</p>
+  <p>为什么召回之后还要重排？因为召回用的是 <strong>Bi-encoder（双塔）</strong>：查询和文档各自独立编码成向量，可以离线预计算、快，但<strong>两者之间没有交互</strong>，精度有限。重排用的是 <strong>Cross-encoder（交叉编码器）</strong>：把"查询 + 文档"拼在一起过模型，能捕捉细粒度交互，准得多——代价是没法预计算，只能对少量候选做。</p>
+  <p class="muted">这就是"两阶段检索"的分工：<strong>用便宜的方法保证不漏，用昂贵的方法保证排序。</strong></p>
+
+  <h2>二、三个必须做对的地方</h2>
+  <table>
+    <thead><tr><th>要点</th><th>为什么</th></tr></thead>
+    <tbody>
+      <tr><td>响应的 <code>index</code> 必须用来映射回原候选</td><td>它只是"输入数组的下标"。不回映射就拿不到 chunk 的 doc_id / 文件名 / 原文位置</td></tr>
+      <tr><td><code>relevance_score</code> 与 cosine <strong>尺度不同</strong></td><td>两者不可比较，所以单独存字段，绝不混着排序</td></tr>
+      <tr><td>必须记录 <code>original_rank</code></td><td>这是本项目最有价值的可观测数据——能一眼看出"谁被顶上来了"</td></tr>
+    </tbody>
+  </table>
+
+  <h3>降级：为什么不能抛异常</h3>
+  <p>重排失败时，代码选择<strong>退化</strong>成"直接取召回前 N 条"，并给每条打上 <code>degraded=True</code>，而不是把异常往上抛。</p>
+  <p>理由是：重排只是"锦上添花"，不是问答链路的必需品。为了它让整个问答挂掉，不划算。但降级必须<strong>被标记出来</strong>——否则用户看到的是"排过序的结果"，实际上根本没排，这是另一种形式的"静默错误"。</p>
+
+  <h2>三、⚠️ 真实的排查过程（本课重点）</h2>
+  <p>下面这些是真实发生的，不是编的。</p>
+
+  <h3>症状</h3>
+  <p>问"召回和重排有什么区别？"，4 条候选里只有 1 条相关。结果却是：</p>
+  <pre><code>[(2, 0.6674), (3, 0.6674), (1, 0.6357), (0, 0.6068)]
+                ↑ 两条无关项分数一模一样          ↑ 相关的那条排最后</code></pre>
+
+  <h3>错误的第一反应</h3>
+  <p>我判断"模型大概没开通"，让你去控制台确认——<strong>结果控制台显示已开通，额度也在正常扣</strong>。这个方向被证伪了。</p>
+
+  <h3>四个正确动作，逐个逼近真相</h3>
+  <ol class="steps">
+    <li><strong>先确认结果可复现。</strong> 同一请求跑两遍，结果一模一样 → 不是随机抖动，是稳定行为。</li>
+    <li><strong>让工具自证：请求 <code>return_documents=true</code>。</strong> 让接口把每条文档的原文一起回显。结果回显的 <code>index</code> 与原文完全对得上 → <strong>排除"下标映射错位"</strong>。</li>
+    <li><strong>做一个"结论必然如此"的对照实验。</strong> 把同一组内容翻译成英文再跑一遍：英文结果是 <code>[(0, 0.9189), (3, 0.2046), ...]</code>——<strong>完美</strong>。同一个模型、同一套代码，英文对、中文错 → 问题一定出在<strong>语言 / 编码</strong>这条线上。</li>
+    <li><strong>换一条传输路径。</strong> 之前我一直用终端管道把脚本喂给 <code>python -</code>。这次把脚本<strong>写成真正的 <code>.py</code> 文件</strong>（UTF-8）再运行——中文也完美了：<code>[(0, 0.931), (3, 0.2092), ...]</code>。</li>
+  </ol>
+
+  <div class="note">
+    <span class="label">真凶</span>
+    <strong>PowerShell 把含中文的脚本文本通过管道传给 <code>python -</code> 时，中文被按控制台代码页编码，真的损坏了</strong>——不只是显示成 <code>?</code>，而是发到模型那边就是乱码。模型拿到乱码，自然给出一堆"挤在一起、排序错乱"的分数。
+    <br><br>
+    英文是 ASCII，任何编码都坏不了，所以英文测试一直是对的——这也正是它能当"对照实验"的原因。
+  </div>
+
+  <h3>一条硬规则</h3>
+  <p><strong>凡含中文（任何非 ASCII 字符）的验证脚本，一律写成 <code>.py</code> 文件再运行，不要用管道喂 stdin。</strong></p>
+  <p class="muted">这条规则的代价我刚刚付过：因为误判成"模型不可用"，白跑了一轮控制台确认，差点把一个好模型换掉。</p>
+
+  <h2>四、可复用的排查套路</h2>
+  <table>
+    <thead><tr><th>动作</th><th>解决什么</th></tr></thead>
+    <tbody>
+      <tr><td>跑两遍看是否稳定</td><td>排除随机性，确认是"稳定行为"而不是偶发</td></tr>
+      <tr><td>让工具自证（回显 / 打印中间值）</td><td>排除"数据在传递中变了形"</td></tr>
+      <tr><td>做"结论必然如此"的对照实验</td><td>把问题一刀切到某个维度（这里是"中文 vs 英文"）</td></tr>
+      <tr><td>换一条传输 / 执行路径</td><td>排除工具链本身引入的失真</td></tr>
+      <tr><td>缩到最小可复现案例</td><td>区分"普遍问题"还是"特定条件下的问题"</td></tr>
+    </tbody>
+  </table>
+  <div class="note">
+    <span class="label">一句话</span>
+    结果"不可思议"时，<strong>先怀疑你的验证工具，再怀疑被验证的对象</strong>。因为"工具错了"的典型特征，就是"结果离谱到不像真的"。
+  </div>
+
+  <h2>五、实测数据</h2>
+  <table>
+    <thead><tr><th>验收点</th><th>实测</th></tr></thead>
+    <tbody>
+      <tr><td>相关项排到第 1</td><td>✅ <code>original_rank=1 → new_rank=0</code>，分数 <strong>0.9039</strong>（其余 0.3718 / 0.2895 / 0.2173）</td></tr>
+      <tr><td><code>original_rank</code> 反映重排前排名</td><td>✅ 逐条与召回下标一致</td></tr>
+      <tr><td><code>top_n</code> 生效</td><td>✅ top_n=2 → 返回 2 条</td></tr>
+      <tr><td><code>rerank_enabled=False</code></td><td>✅ <code>get_reranker()</code> 返回 <code>None</code></td></tr>
+      <tr><td>endpoint 故意改错</td><td>✅ 404 → 未抛异常 → 降级为前 4 条，全部 <code>degraded=True</code></td></tr>
+      <tr><td>单次耗时</td><td>1.3 ~ 1.6 秒</td></tr>
+      <tr><td>顺带复验 T3 语义</td><td>相近 0.7246 / 无关 0.2138（<strong>此前管道跑出的 0.9301 / 0.8952 也是被污染的</strong>）</td></tr>
+    </tbody>
+  </table>
+  <p class="muted">注意最后一行：这个 bug 不只影响 T5，它<strong>之前就已经污染过 T3 的一次验证</strong>。当时那个结论"碰巧"仍然成立（相近 &gt; 无关），但数据本身是错的——这也说明：<strong>结论对，不代表过程对</strong>。</p>
+
+  <h2>六、亲手做一遍</h2>
+  <div class="note">
+    <span class="label">练习 A · 亲手复现这个陷阱</span>
+    写一个含中文的短脚本：先直接运行，再用管道跑一次（<code>@'...'@ | python -</code>），在脚本里打印 <code>[hex(ord(c)) for c in "召回"]</code>。对比两次输出的码点，亲眼看到管道那次变成了别的值。
+  </div>
+  <div class="note">
+    <span class="label">练习 B · 亲手用 return_documents</span>
+    给重排请求加上 <code>"return_documents": true</code>，观察响应里多出的 <code>document.text</code>。想清楚：这个参数为什么能帮你排除"下标错位"？
+  </div>
+  <div class="note">
+    <span class="label">练习 C · 想清楚一个设计题</span>
+    如果重排失败时不降级、而是直接把异常抛给上层，会有什么后果？如果降级了但<strong>不标记</strong> <code>degraded</code>，又有什么后果？
+  </div>
+
+  <h2>七、自测（凭记忆答）</h2>
+
+  <div class="quiz" data-answer="a">
+    <p class="q">1. 为什么召回之后还需要一层重排？</p>
+    <button class="quiz-option" data-key="a">交叉编码器能捕捉查询与文档的细粒度交互</button>
+    <button class="quiz-option" data-key="b">双塔模型无法处理数量很多的候选文档</button>
+    <button class="quiz-option" data-key="c">重排能把候选文档的向量维度降下来</button>
+    <button class="quiz-option" data-key="d">重排可以在本地完成无需调用任何接口</button>
+    <p class="feedback"
+       data-correct="对。召回用双塔（快、无交互），重排用交叉编码器（慢、有交互，更准）。"
+       data-wrong="再想想：两阶段的分工是"便宜的方法保证不漏，昂贵的方法保证排序"。"></p>
+  </div>
+
+  <div class="quiz" data-answer="a">
+    <p class="q">2. 重排响应里的 <code>index</code> 代表什么？</p>
+    <button class="quiz-option" data-key="a">该文档在输入数组里的下标位置</button>
+    <button class="quiz-option" data-key="b">该文档在整个向量库里的编号</button>
+    <button class="quiz-option" data-key="c">该文档按相关度排出来的名次</button>
+    <button class="quiz-option" data-key="d">该文档所属那篇原始文档的编号</button>
+    <p class="feedback"
+       data-correct="对。必须用它映射回原候选，才能拿回 chunk 元数据。"
+       data-wrong="再想想：它是输入 documents 数组的下标，不是名次也不是文档编号。"></p>
+  </div>
+
+  <div class="quiz" data-answer="a">
+    <p class="q">3. 为什么重排失败时选择降级而不是抛异常？</p>
+    <button class="quiz-option" data-key="a">保证问答链路不因重排挂掉而中断</button>
+    <button class="quiz-option" data-key="b">因为异常在 Python 里很难被正确捕获</button>
+    <button class="quiz-option" data-key="c">因为降级的结果一定比抛异常更准确</button>
+    <button class="quiz-option" data-key="d">因为接口本身永远不会返回错误状态码</button>
+    <p class="feedback"
+       data-correct="对。重排是锦上添花，不该成为链路的单点故障；但必须标记 degraded。"
+       data-wrong="再想想：重排不是必需品，为了它让整个问答挂掉不划算。"></p>
+  </div>
+
+  <div class="quiz" data-answer="a">
+    <p class="q">4. 结果"不可思议"时，最先该做什么？</p>
+    <button class="quiz-option" data-key="a">先做能自证的对照实验</button>
+    <button class="quiz-option" data-key="b">立刻更换成另一个模型</button>
+    <button class="quiz-option" data-key="c">把这段代码整体重写一遍</button>
+    <button class="quiz-option" data-key="d">先去官方仓库提一个 issue</button>
+    <p class="feedback"
+       data-correct="对。先怀疑工具：跑两遍、让工具自证、做对照实验，别急着换方案。"
+       data-wrong="再想想：换模型/重写都是"猜"，对照实验才是定位。"></p>
+  </div>
+
+  <h2>八、想深入时读这个</h2>
+  <p><strong>首选一手资源：</strong><a href="https://help.aliyun.com/zh/model-studio/rerank">阿里云百炼官方文档 · 重排序（Rerank）</a>——中文原生，讲清了"重排在什么场景下最有价值"，也可以核对 endpoint 与模型列表。</p>
+  <p class="muted">⚠️ 但请记住本课的教训：<strong>文档示例不一定能直接跑通</strong>（这次它的请求体格式就和实测不一致），以实测为准。完整资源见 <a href="../RESOURCES.md">RESOURCES.md</a>。</p>
+
+  <div class="foot">
+    不清楚就直接问，比如"为什么 PowerShell 管道会按代码页而不是 UTF-8 编码""Bi-encoder 和 Cross-encoder 到底差在哪"。我是你的老师，问多基础都可以。
+  </div>
+
+</div>
+<script src="../assets/quiz.js"></script>
+</body>
+</html>

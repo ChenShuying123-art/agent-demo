@@ -1,0 +1,502 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>课程 0009 · 协议、工厂、适配器，以及"OpenAI 兼容协议"</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+<div class="wrap">
+
+  <p class="eyebrow">课程 0009 · RAG 项目实战 · 概念补课（T6 延伸）</p>
+  <h1>协议、工厂、适配器，以及"OpenAI 兼容协议"</h1>
+  <p class="lede">这一课把四个容易糊在一起的词串起来：<strong>协议 / 工厂 / 适配器 / OpenAI 兼容协议</strong>。它们背后其实是同一个思想——<strong>把"变化"关进一个笼子里</strong>。</p>
+
+  <div class="win">
+    <strong>学完你能做到：</strong>看懂三个 Provider 模块（embeddings / rerank / llm）为什么长得一样；知道换模型、换厂商时该改哪里；以及为什么重排不能用 openai SDK。
+    <br><span class="muted">配套：<a href="../reference/python-concepts-glossary.html">术语表</a> · 前置 <a href="0008-how-to-write-t6.html">课程 0008</a></span>
+  </div>
+
+  <h2>一、总纲：一句话串起四个词</h2>
+  <div class="note">
+    <span class="label">记住这句</span>
+    <strong>协议定形状 → 适配器把外部实现改造成这个形状 → 工厂决定用哪个。</strong>
+  </div>
+  <p>"OpenAI 兼容协议"则是这套思想在<strong>现实世界</strong>里的一个现成例子——厂商们共用同一种"形状"。</p>
+
+  <div class="diagram">
+    <div class="dbox lead"><strong>协议 Protocol</strong><span>「谁有 chat() 这个方法，谁就合格」</span></div>
+    <div class="darrow">↓ 谁符合这个形状？</div>
+    <div class="drow">
+      <div class="dbox"><strong>适配器</strong><span>DashScopeChat<br>翻译接口与异常</span></div>
+      <div class="dbox"><strong>替身（测试用）</strong><span>FakeChat<br>不联网、不花钱</span></div>
+    </div>
+    <div class="darrow">↓ 谁来创建？</div>
+    <div class="dbox lead"><strong>工厂 get_llm()</strong><span>「用哪个实现」只在这里决定</span></div>
+    <div class="darrow">↓</div>
+    <div class="dbox"><strong>调用方拿到一个 LLMProvider</strong><span>它不知道背后是百炼、还是别的厂商</span></div>
+    <div class="dcap">图 1 · 协议 → 适配器 → 工厂，三者是一条流水线</div>
+  </div>
+
+  <h2>二、协议 Protocol —— 只规定"能干什么" <span class="tag syntax">语法</span></h2>
+
+  <h3>先看一个类比的场景</h3>
+  <p>招人时你写的是<strong>岗位要求</strong>："会写 Python、能搬 20 公斤、有驾照"。你不在乎他哪个学校毕业、什么血型——<strong>只要满足这几条，就能上岗。</strong></p>
+  <p><code>Protocol</code> 就是这份岗位要求。看 <a href="../../kbqa/llm.py">llm.py</a>：</p>
+  <pre><code>class LLMProvider(Protocol):
+    def chat(self, messages: list[dict], temperature: float | None = None) -> str:
+        ...</code></pre>
+  <p>翻译成人话：<strong>"我不管你是谁，只要你有 <code>chat</code> 这个方法、能收 messages 返回一段文本，你就算 <code>LLMProvider</code>。"</strong></p>
+
+  <h3>最反直觉的一点</h3>
+  <p>看下面这两行——<code>DashScopeChat</code> <strong>并没有继承</strong> <code>LLMProvider</code>：</p>
+  <pre><code>class LLMProvider(Protocol): ...   # 只是"要求"
+class DashScopeChat:               # 注意括号里是空的！
+    def chat(...): ...</code></pre>
+  <p>这是 Protocol 和普通继承最大的区别：</p>
+  <table>
+    <thead><tr><th></th><th>普通继承 / 抽象基类</th><th>Protocol</th></tr></thead>
+    <tbody>
+      <tr><td>判断依据</td><td>你<strong>声明</strong>自己是谁（<code>class A(B)</code>）</td><td>你<strong>长得像不像</strong>（有没有那个方法）</td></tr>
+      <tr><td>换个说法</td><td>看<strong>血统</strong></td><td>看<strong>形状</strong></td></tr>
+      <tr><td>术语</td><td>名义类型（nominal）</td><td>结构类型（structural）</td></tr>
+    </tbody>
+  </table>
+  <p>Python 里有句老话叫 <strong>duck typing（鸭子类型）</strong>：<em>"走起来像鸭子、叫起来像鸭子，那它就是鸭子。"</em> <code>Protocol</code> 就是把这句话<strong>写进代码、让工具能检查</strong>。</p>
+
+  <h3>它到底给你带来什么</h3>
+  <p>假设调用方写成这样（<strong>只依赖"形状"</strong>）：</p>
+  <pre><code>def answer(question: str, llm: LLMProvider):   # 只要形状对
+    return llm.chat([{"role": "user", "content": question}])</code></pre>
+  <p>下面这些<strong>全都能直接塞进去</strong>，<code>answer</code> 一个字都不用改：</p>
+  <ul>
+    <li><code>DashScopeChat(settings)</code></li>
+    <li>换个厂商写的 <code>OtherVendorChat(settings)</code></li>
+    <li><strong>测试用的假模型</strong></li>
+  </ul>
+  <div class="note">
+    <span class="label">亲手试一下（很值）</span>
+<pre><code>class 假模型:                       # 不继承任何东西
+    def chat(self, messages, temperature=None) -> str:
+        return "这是假答案"
+
+def ask(provider, question):
+    return provider.chat([{"role": "user", "content": question}])
+
+print(ask(假模型(), "你好"))       # 输出：这是假答案</code></pre>
+    <strong>完全不需要真实 API、不花钱、不联网。</strong> 这就是为什么"面向协议编程"能让测试变简单——你可以把慢的、贵的、不稳定的外部依赖，换成一个形状一致的替身。
+  </div>
+
+  <div class="note">
+    <span class="label">必须坦白的一点</span>
+    <code>Protocol</code> <strong>在运行时几乎不做检查</strong>。你方法名拼错了，Python 照样让你跑到那一行才报 <code>AttributeError</code>。所以它真正的用途是：<strong>① 给读代码的人看</strong>（一眼知道该有哪些方法）；<strong>② 给类型检查器（mypy）看</strong>（写代码时就报错）。<code>@runtime_checkable</code> 是可选增强，让 <code>isinstance()</code> 也能用，但它只查"方法在不在"，查不了参数类型。
+  </div>
+
+  <h2>三、工厂函数 —— 只在一个地方决定"用哪个" <span class="tag eng">工程</span></h2>
+  <p>去餐厅点"一杯咖啡"，<strong>你不需要知道</strong>用的是哪台咖啡机、哪批豆子。你对着菜单说一句，后厨负责决定。</p>
+  <pre><code>def get_llm(settings: Settings) -> LLMProvider:
+    return DashScopeChat(settings)</code></pre>
+
+  <h3>没有工厂会怎样</h3>
+  <p>假设 3 个地方要用模型，各写一遍：</p>
+  <pre><code># pipeline.py
+self._llm = DashScopeChat(settings)
+# evaluate.py
+llm = DashScopeChat(settings)
+# api/routes.py
+llm = DashScopeChat(settings)</code></pre>
+  <p>现在要换厂商——<strong>得改 3 处</strong>。只要漏一处，就会出现"索引用 A 模型、问答用 B 模型"这种极难排查的诡异 bug。有了工厂：<strong>改 1 处。</strong></p>
+
+  <h3>注意返回类型 <code>-&gt; LLMProvider</code></h3>
+  <p>这是<strong>工厂和协议之间的扣</strong>：工厂返回的是<strong>协议类型</strong>（形状），不是 <code>DashScopeChat</code>（具体类）。所以调用方拿到的永远是"一个能满足 LLMProvider 的东西"，它压根不知道、也不该知道背后是谁。</p>
+
+  <h3>项目里还有个更妙的例子</h3>
+  <p>工厂还能替你做<strong>决策</strong>。看 rerank.py：</p>
+  <pre><code>def get_reranker(settings: Settings) -> RerankProvider | None:
+    if not settings.rerank_enabled:
+        return None            # ← 连"要不要有这个对象"都帮你决定了
+    return DashScopeReranker(settings)</code></pre>
+  <p>调用方只需要 <code>if reranker is None: 跳过重排</code>。<strong>"要不要开重排"这个判断只写了一遍</strong>，而不是散落在每个调用点。</p>
+
+  <h2>四、适配器 —— 在边界上"翻译" <span class="tag eng">工程</span></h2>
+  <p>出国旅行插座形状不一样，你带个<strong>转换插头</strong>：你的电器不用改，国外的电网也不用改——<strong>转换头承担了全部差异</strong>。</p>
+  <p>在 llm.py 里，这个转换头翻译了<strong>两样东西</strong>。</p>
+
+  <h3>翻译一：接口形状</h3>
+  <p>外面的 SDK 长这样（<code>model</code> / <code>messages</code> / <code>extra_body</code> 都是 <strong>SDK 的习惯</strong>）：</p>
+  <pre><code>self._client.chat.completions.create(
+    model=..., messages=..., temperature=..., extra_body=...
+)</code></pre>
+  <p>你的项目只认一个简单形状：<code>llm.chat(messages)</code>。<strong>差异被 <code>DashScopeChat</code> 吃掉了。</strong></p>
+
+  <h3>翻译二：异常形状（这个更重要）</h3>
+  <p>外面抛的异常五花八门，长这样：</p>
+  <pre><code>openai.AuthenticationError(
+    body={"error": {"code": "invalid_api_key", "message": "..."}}
+)</code></pre>
+  <p>你的项目只想要一个稳定的形状，所以在边界上翻译一次：</p>
+  <pre><code>except Exception as exc:
+    code = _error_code(exc)                                  # 从外部形状里挖出 code
+    raise LLMError(f"LLM 调用失败 code={code}：{exc}", code) from exc</code></pre>
+  <table>
+    <thead><tr><th></th><th>不翻译</th><th>翻译之后</th></tr></thead>
+    <tbody>
+      <tr><td>上层要写</td><td><code>except openai.AuthenticationError</code><br><code>except openai.RateLimitError</code><br><code>except openai.APIConnectionError</code><br>…每处调用都要重复</td><td><code>except LLMError as e</code><br>读 <code>e.code</code> 即可</td></tr>
+      <tr><td>换厂商时</td><td>上层的 except 全都要改</td><td>上层不用动</td></tr>
+    </tbody>
+  </table>
+  <p class="muted">注意最后那行 <code>from exc</code>——这叫<strong>异常链</strong>，它保留原始异常的堆栈。<strong>翻译不能翻译掉线索。</strong>而 <code>_error_code()</code> 就是那本"翻译词典"：它知道外面可能有几种写法，挨个试，最后兜底用 HTTP 状态码。</p>
+
+  <h2>五、⚠️ 注意：此"协议"非彼"协议"</h2>
+  <p>你刚学的 <code>typing.Protocol</code> 和接下来要讲的"OpenAI 兼容协议"，<strong>是两个完全不同的东西，只是中文都译成了"协议"</strong>：</p>
+  <table>
+    <thead><tr><th></th><th><code>typing.Protocol</code></th><th>"OpenAI 兼容协议"</th></tr></thead>
+    <tbody>
+      <tr><td>层面</td><td><strong>Python 代码内部</strong>的约定</td><td><strong>网络接口</strong>上的约定</td></tr>
+      <tr><td>约定什么</td><td>有哪些方法、什么签名</td><td>URL 路径、请求字段、响应结构</td></tr>
+      <tr><td>谁看</td><td>类型检查器 + 读代码的人</td><td>客户端 SDK + 服务端</td></tr>
+      <tr><td>类比</td><td>"岗位要求"</td><td>"插座标准"</td></tr>
+    </tbody>
+  </table>
+  <div class="note">
+    <span class="label">但精神是同一个</span>
+    先约定好形状，双方各自实现，就能互相对接。<strong>理解了这一点，你就抓住了这两个词的本质。</strong>
+  </div>
+
+  <h2>六、OpenAI 兼容协议 —— 它是什么</h2>
+  <p><strong>OpenAI 的 <code>chat/completions</code> 接口太流行了，成了事实标准。</strong></p>
+  <p>于是其他厂商（阿里云百炼、DeepSeek、月之暗面、智谱……）做了一件很聪明的事：把自己的接口做成<strong>"形状和 OpenAI 一模一样"</strong>。好处是——<strong>你现有的 OpenAI 代码，改两行就能跑在百炼上。</strong></p>
+  <p>它<strong>不是</strong>国际标准组织发布的标准，没有 RFC 文档。它是"<strong>因为大家都这么干，所以成了约定</strong>"——工程界叫<strong>事实标准（de facto standard）</strong>。</p>
+
+  <h3>它具体"兼容"了四样东西</h3>
+  <table>
+    <thead><tr><th>兼容项</th><th>OpenAI 的写法</th><th>百炼照抄的</th></tr></thead>
+    <tbody>
+      <tr><td>URL 路径</td><td><code>/v1/chat/completions</code></td><td><code>/compatible-mode/v1/chat/completions</code></td></tr>
+      <tr><td>请求体字段</td><td><code>model</code> / <code>messages</code> / <code>temperature</code></td><td>完全一样</td></tr>
+      <tr><td>响应结构</td><td><code>resp.choices[0].message.content</code></td><td>完全一样</td></tr>
+      <tr><td>错误格式</td><td><code>{"error": {"code", "message"}}</code></td><td>基本一样</td></tr>
+    </tbody>
+  </table>
+  <p>注意路径里那个 <strong><code>compatible-mode</code>（兼容模式）</strong>就是在自报家门："我这里是照着 OpenAI 的样子做的。"</p>
+
+  <h2>七、怎么用：真的只改两处</h2>
+  <pre><code>from openai import OpenAI
+
+client = OpenAI(
+    api_key="sk-xxx",                                              # ← 改这里
+    base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",  # ← 改这里
+)
+
+resp = client.chat.completions.create(
+    model="qwen-plus",                     # ← 和这里（换成百炼的模型名）
+    messages=[{"role": "user", "content": "你好"}],
+)
+
+print(resp.choices[0].message.content)</code></pre>
+  <p><strong>就这些。</strong>你写的是"OpenAI 的代码"，实际请求打到的是阿里云。本项目 llm.py 就是这么干的：</p>
+  <pre><code>self._client = OpenAI(
+    api_key=settings.dashscope_api_key,
+    base_url=settings.chat_base_url,     # = .../compatible-mode/v1
+)</code></pre>
+  <div class="note">
+    <span class="label">一句话</span>
+    <strong>真正的魔法不在代码里，在 <code>base_url</code> 那一个字符串上。</strong>
+  </div>
+
+  <h2>八、项目里的活证据</h2>
+  <p>回到 config.py，三个 URL 形成了鲜明对比：</p>
+  <pre><code># 对话 —— 走 OpenAI 兼容
+chat_base_url      = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+
+# Embedding —— 也走 OpenAI 兼容（注意：和上面是同一个 URL！）
+embedding_base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+
+# Rerank —— 不走兼容，是百炼自有协议
+rerank_endpoint    = "https://dashscope.aliyuncs.com/api/v1/services/rerank/text-rerank/text-rerank"</code></pre>
+
+  <h3>观察一：对话和向量用的是同一个 base_url</h3>
+  <p>那服务端怎么知道你要聊天还是算向量？<strong>靠 <code>model</code> 名区分。</strong></p>
+  <pre><code>client.chat.completions.create(model="qwen-plus", ...)          # 聊天
+client.embeddings.create(model="text-embedding-v4", ...)        # 向量</code></pre>
+
+  <h3>观察二：Rerank 的 URL 长得完全不一样</h3>
+  <p>它没有 <code>compatible-mode</code>。这就是为什么 rerank.py 里<strong>没有用 openai SDK，而是用 httpx 手写 HTTP 请求</strong>——它压根不走 OpenAI 兼容协议。</p>
+
+  <div class="diagram">
+    <div class="drow">
+      <div class="dbox"><strong>对话 / 向量</strong><span>compatible-mode/v1<br>OpenAI 兼容 → 用 openai SDK</span></div>
+      <div class="dbox"><strong>重排（Rerank）</strong><span>api/v1/services/rerank/…<br>自有协议 → 只能用 httpx 手写</span></div>
+    </div>
+    <div class="dcap">图 2 · 同一个平台，两套协议；走不走"兼容"决定了你用什么工具</div>
+  </div>
+
+  <p class="muted">这也顺便解释了你之前看到的那个坑：重排的请求体是 <code>{input: {query, documents}, parameters: {top_n}}</code>，和 OpenAI 的扁平风格完全不同——<strong>因为它根本不是 OpenAI 的形状</strong>。</p>
+
+  <h2>九、⚠️ "兼容"不等于"完全一样"</h2>
+  <p><strong>兼容是"大部分一样"，不是"全部一样"。</strong>差异主要有三类：</p>
+  <table>
+    <thead><tr><th>差异类型</th><th>例子</th><th>怎么处理</th></tr></thead>
+    <tbody>
+      <tr><td>厂商私有参数</td><td><code>enable_thinking</code>（百炼独有）</td><td>塞进 <code>extra_body={...}</code></td></tr>
+      <tr><td>额外的响应字段</td><td><code>reasoning_content</code>（思考过程）</td><td>用 <code>getattr</code> 取</td></tr>
+      <tr><td>能力支持不完全</td><td>某些 <code>tools</code> / <code>response_format</code> 行为不同</td><td>得实测确认</td></tr>
+    </tbody>
+  </table>
+  <p>这正好解释了你代码里那行 <code>extra_body</code>：</p>
+  <pre><code>resp = self._client.chat.completions.create(
+    model=self._model,
+    messages=messages,
+    temperature=temp,                                        # ← 标准字段，直接传
+    extra_body={"enable_thinking": self._enable_thinking},   # ← 私有字段，只能走 extra_body
+)</code></pre>
+  <p><strong>为什么 <code>enable_thinking</code> 非得包一层？</strong>因为 OpenAI SDK 不认识它——SDK 是按 OpenAI 的规格写的，遇到不认识的参数会直接报错。<code>extra_body</code> 就是官方留的"<strong>协议之外，我自己加点东西</strong>"的逃生口。</p>
+  <div class="note">
+    <span class="label">一句话</span>
+    <strong><code>extra_body</code> 里的东西，就是"兼容协议"没覆盖到的地方。</strong>
+  </div>
+
+  <h2>十、把这一课用在真实世界</h2>
+  <p>因为这套东西<strong>不止百炼一家在学</strong>。你学会之后：</p>
+  <table>
+    <thead><tr><th>平台</th><th><code>base_url</code></th><th>要改的地方</th></tr></thead>
+    <tbody>
+      <tr><td>阿里云百炼</td><td><code>.../compatible-mode/v1</code></td><td>本项目正在用</td></tr>
+      <tr><td>DeepSeek</td><td><code>https://api.deepseek.com/v1</code></td><td>改 <code>base_url</code> + <code>model</code></td></tr>
+      <tr><td>月之暗面 Kimi</td><td><code>https://api.moonshot.cn/v1</code></td><td>同上</td></tr>
+      <tr><td>智谱 GLM</td><td><code>https://open.bigmodel.cn/api/paas/v4</code></td><td>同上</td></tr>
+      <tr><td><strong>本地 Ollama</strong></td><td><code>http://localhost:11434/v1</code></td><td>同上，<strong>还免费</strong></td></tr>
+    </tbody>
+  </table>
+  <p><strong>同一份代码，改一个字符串，就能换一家厂商。</strong>这就是"事实标准"的威力——也是为什么 spec 里 NFR-2 要求的"可替换"成本这么低。</p>
+
+  <h2>十一、纵深：把三套适配器放在一起看 <span class="tag eng">工程</span></h2>
+  <p>前面几节都以 <code>llm.py</code> 举例。其实项目里<strong>有三套完全对称</strong>的结构——凡是要连"外部世界"的地方，都是同一个套路：</p>
+  <table>
+    <thead><tr><th>角色</th><th>对话</th><th>向量</th><th>重排</th></tr></thead>
+    <tbody>
+      <tr><td>协议</td><td><code>LLMProvider</code>（<code>chat</code>）</td><td><code>EmbeddingProvider</code>（<code>embed</code> / <code>dim</code>）</td><td><code>RerankProvider</code>（<code>rerank</code>）</td></tr>
+      <tr><td>适配器</td><td><code>DashScopeChat</code></td><td><code>DashScopeEmbedding</code></td><td><code>DashScopeRerank</code></td></tr>
+      <tr><td>工厂</td><td><code>get_llm()</code></td><td><code>get_embedding_provider()</code></td><td><code>get_reranker()</code></td></tr>
+      <tr><td>调用方</td><td colspan="3"><code>RAGPipeline</code> / <code>api</code>——只认协议</td></tr>
+    </tbody>
+  </table>
+  <p>三个文件里，"协议在最上、适配器在中间、工厂在最后"的顺序一模一样。<strong>这不是巧合，是刻意统一</strong>——看懂一个，另外两个不用看。</p>
+
+  <h3>证据：调用方根本不认识"外部世界"</h3>
+  <p>这是整节最关键的一点。看 <code>kbqa/pipeline.py</code> 的<strong>全部 import</strong>：</p>
+  <pre><code>from kbqa.embeddings import EmbeddingProvider    # ← 只 import 协议
+from kbqa.llm import LLMProvider
+from kbqa.rerank import RerankProvider
+# 注意：整个文件里没有 openai，也没有 httpx</code></pre>
+  <p>构造函数里的类型注解同样只写协议：</p>
+  <pre><code>def __init__(self, settings, store,
+             embedder: EmbeddingProvider,       # 不是 DashScopeEmbedding
+             reranker: RerankProvider | None,
+             llm: LLMProvider): ...</code></pre>
+  <div class="note">
+    <span class="label">可以自己去验</span>
+    在项目根目录跑：<code>grep -n "openai\|httpx" kbqa/pipeline.py</code> —— <strong>没有任何输出</strong>。
+    也就是说：编排层从头到尾<strong>不知道百炼、不知道 http、不知道 SDK 的存在</strong>。
+  </div>
+
+  <h3>适配器到底"翻译"了几样东西（本项目真实清单）</h3>
+  <table>
+    <thead><tr><th>#</th><th>消化了什么</th><th>在哪</th><th>例子</th></tr></thead>
+    <tbody>
+      <tr><td>1</td><td>接口形状</td><td><code>DashScopeChat</code> / <code>DashScopeRerank</code></td><td><code>chat.completions.create(...)</code> vs <code>httpx.post(endpoint, json={...})</code>——两套完全不同的协议，对外都是"给输入，还结果"</td></tr>
+      <tr><td>2</td><td>厂商私有参数</td><td><code>DashScopeChat</code></td><td><code>extra_body={"enable_thinking": False}</code></td></tr>
+      <tr><td>3</td><td>返回值归一</td><td><code>DashScopeRerank</code></td><td>响应的 <code>index</code> → 映射回 <code>chunk</code>；<code>relevance_score</code> → <code>rerank_score</code></td></tr>
+      <tr><td>4</td><td>异常形状</td><td><code>DashScopeChat</code></td><td>各种 SDK 异常 → 带 <code>code</code> 的 <code>LLMError</code></td></tr>
+      <tr><td>5</td><td><strong>吸收不可靠性</strong></td><td><code>DashScopeRerank</code></td><td>调用失败 → 返回 <code>degraded=True</code> 的降级结果，<strong>不抛异常</strong></td></tr>
+    </tbody>
+  </table>
+  <p>第 5 条最容易被忽略，也最重要：</p>
+  <pre><code>except Exception as exc:                      # 网络/协议/鉴权任何问题
+    logger.warning("rerank 调用失败，已降级为直接截断前 %d 条：%s", top_n, exc)
+    return self._fallback(candidates, top_n)  # ← 不让整条问答链路跟着崩</code></pre>
+  <p><strong>外部服务会挂、会超时、会返回怪东西——这些"脏活"全在适配器里消化掉</strong>，上层永远拿到形状稳定、含义明确的结果（哪怕是明确标记过的降级结果）。</p>
+
+  <h3>"换实现只改一处"——到底改哪一处</h3>
+  <table>
+    <thead><tr><th>你想做的事</th><th>要改的地方</th><th>完全不用碰</th></tr></thead>
+    <tbody>
+      <tr><td>换对话模型（qwen-plus → qwen-max）</td><td><code>.env</code> 一行 <code>CHAT_MODEL=</code></td><td>所有代码</td></tr>
+      <tr><td>关掉重排做消融实验</td><td><code>.env</code> 的 <code>RERANK_ENABLED=false</code></td><td>代码（工厂返回 <code>None</code>，pipeline 已处理）</td></tr>
+      <tr><td>换厂商 / 接自建兼容服务</td><td>新写一个适配器 + <code>get_llm</code> 改一行</td><td>pipeline / api / 前端</td></tr>
+      <tr><td><strong>测试时不花一分钱</strong></td><td>写个 <code>FakeLLM</code> + 让工厂按开关返回它</td><td>同上</td></tr>
+    </tbody>
+  </table>
+  <p>装配点也只有一个地方（<code>api/main.py</code>）：</p>
+  <pre><code>pipeline = RAGPipeline(settings=settings, store=store,
+    embedder=get_embedding_provider(settings),   # 工厂返回的是"协议类型"
+    reranker=get_reranker(settings),
+    llm=get_llm(settings))</code></pre>
+
+  <h3>⚠️ 修正一句话：不是"所有外部依赖都要抽"</h3>
+  <p>本项目里<strong>文件系统就没有抽适配器</strong>——<code>loaders</code> / <code>vectorstore</code> 是直接用标准库的：</p>
+  <pre><code>path.read_text(encoding="utf-8")                  # loaders 直接读
+np.save(self._index_dir / _vectors_file, ...)     # vectorstore 直接写</code></pre>
+  <p>为什么这样没问题？因为它是<strong>标准库、几乎不会换、也没有第二个实现</strong>。所以"把外部依赖收进适配器"是一条<strong>方向</strong>，不是教条。</p>
+  <h4>什么时候才值得抽？问三个问题</h4>
+  <table>
+    <thead><tr><th>问题</th><th>如果答案是"会/有"</th></tr></thead>
+    <tbody>
+      <tr><td>它<strong>会不会变</strong>？</td><td>会变 → 考虑抽</td></tr>
+      <tr><td>会不会有<strong>第二个实现</strong>？（测试替身也算）</td><td>会有 → 值得抽</td></tr>
+      <tr><td>有没有<strong>外部怪癖</strong>？（协议不同 / 会失败 / 要花钱）</td><td>有 → 该抽</td></tr>
+    </tbody>
+  </table>
+  <p><strong>三问皆"否" → 别抽。</strong>反例就在项目里：<code>chunking.py</code> 是个纯函数（输入文本、输出片段），不碰网络也不碰磁盘，给它套一层协议没有任何收益，只多一层跳转。</p>
+  <h4>那文件系统什么时候该抽？</h4>
+  <p>当你要支持<strong>多个后端</strong>（本地磁盘 / 对象存储 OSS / 数据库），或者要在<strong>测试里换成假的</strong>（不写真实文件就能测存储逻辑）时，就定义 <code>StorageProvider</code>（<code>put / get / exists / list / delete</code>），让 <code>loaders</code> / <code>vectorstore</code> 改成依赖它——<strong>套路和现在三个模型适配器一模一样</strong>。</p>
+
+  <div class="diagram">
+    <div class="dbox"><strong>外部世界</strong><span>会变 · 会挂 · 有怪癖 · 要花钱</span></div>
+    <div class="darrow">↓ 被"适配器"包住，怪癖关在里面</div>
+    <div class="dbox"><strong>适配器</strong><span>翻译形状 / 参数 / 返回值 / 异常 / 消化失败</span></div>
+    <div class="darrow">↓ 工厂决定"用哪一个实现"</div>
+    <div class="dbox"><strong>工厂 get_xxx()</strong><span>换实现只改这一处</span></div>
+    <div class="darrow">↓ 只暴露"协议"约定的形状</div>
+    <div class="dbox lead"><strong>调用方（pipeline / api）</strong><span>只认协议，不认识外部世界</span></div>
+    <div class="dcap">图 3 · 这一课的总纲图（判断"要不要抽"时，回头看看最上面那行）</div>
+  </div>
+
+  <h2>十二、亲手做一遍</h2>
+
+  <div class="note">
+    <span class="label">练习 A · 亲眼看到"形状对了就行"</span>
+    写一个 <code>假模型</code> 类（不继承任何东西，只实现 <code>chat</code>），写一个只依赖形状的函数 <code>ask(provider, question)</code>，把假模型塞进去跑通。想清楚：为什么这样能省下真实的 API 费用？
+  </div>
+
+  <div class="note">
+    <span class="label">练习 B · 换厂商（不用改 llm.py 一个字）</span>
+<pre><code>from kbqa.config import settings
+from kbqa.llm import DashScopeChat
+
+other = settings.model_copy(update={
+    "chat_base_url": "https://api.deepseek.com/v1",
+    "chat_model": "deepseek-chat",
+})
+print(DashScopeChat(other).chat([{"role": "user", "content": "说一句话"}]))</code></pre>
+    （需要 DeepSeek 的 key；也可以换成你本地跑的 Ollama。）观察：<strong>llm.py 一个字没动。</strong>
+    <br><br>顺带一个思考题：这时候类名叫 <code>DashScopeChat</code> 就<strong>名不副实</strong>了。这说明类名应该描述"<strong>它适配了什么形状</strong>"，而不是"<strong>它连的是哪家</strong>"。
+  </div>
+
+  <div class="note">
+    <span class="label">练习 C · 想清楚一个设计题</span>
+    如果把 <code>llm.py</code> 里的 <code>LLMError</code> 去掉、直接把 SDK 异常抛出去，T10 的 API 层要写多少种 <code>except</code>？以后换厂商时这些 <code>except</code> 要不要跟着改？
+  </div>
+
+  <div class="note">
+    <span class="label">练习 D · 观察"同一个 URL 干两件事"</span>
+    对照 config.py，确认 <code>chat_base_url</code> 和 <code>embedding_base_url</code> 是同一个字符串。然后在代码里找出"服务端靠什么区分这两类请求"。
+  </div>
+
+  <div class="note">
+    <span class="label">练习 E · 用替身跑通上层（省掉最贵的一步）</span>
+<pre><code>class FakeLLM:
+    def chat(self, messages, temperature=None) -&gt; str:
+        return "这是测试答案，引用 [1]。"
+
+pipeline = RAGPipeline(settings, store, get_embedding_provider(settings),
+                       get_reranker(settings), FakeLLM())   # ← 只换了这一个参数
+result = pipeline.answer("随便问点什么", "strict_citation", None)
+print(result.answer, result.citations)      # 测试答案 + 引用列表</code></pre>
+    观察两点：<strong>① <code>pipeline</code> 一行都没改；② "生成"这一步一次网络请求都没发。</strong>
+    这就是"依赖协议而不是依赖实现"给你的直接好处——<strong>慢的、贵的、不稳定的那一环，可以随时换成形状一致的替身。</strong>
+    <br><span class="muted">（检索那一步仍会真调 embedding，用来拿到候选；想完全不联网，可以再给 embedder 写一个"返回固定向量"的替身。）</span>
+  </div>
+
+  <h2>十三、自测（凭记忆答）</h2>
+
+  <div class="quiz" data-answer="a">
+    <p class="q">1. `Protocol` 判断一个对象"合不合格"的依据是什么？</p>
+    <button class="quiz-option" data-key="a">它有没有约定的那些方法（看形状）</button>
+    <button class="quiz-option" data-key="b">它的类有没有显式继承这个协议</button>
+    <button class="quiz-option" data-key="c">它的源文件是不是放在同一个目录里</button>
+    <button class="quiz-option" data-key="d">它的方法名字符串长度是否完全一致</button>
+    <p class="feedback"
+       data-correct="对。Protocol 是结构类型：看你长得像不像，不看你的血统。"
+       data-wrong="再想想：Protocol 判断的是"形状"，不是"有没有继承"。"></p>
+  </div>
+
+  <div class="quiz" data-answer="a">
+    <p class="q">2. 工厂函数最核心的价值是什么？</p>
+    <button class="quiz-option" data-key="a">换实现的时候只需要改动一个地方</button>
+    <button class="quiz-option" data-key="b">让整个程序的运行速度变得更快一些</button>
+    <button class="quiz-option" data-key="c">自动降低调用外部接口所产生的费用</button>
+    <button class="quiz-option" data-key="d">让代码里产生的异常不再向上层传播</button>
+    <p class="feedback"
+       data-correct="对。把"用哪个实现"的决定收进一处，换的时候只改一行。"
+       data-wrong="再想想：工厂解决的是"变化散落各处"的问题，不是性能或异常问题。"></p>
+  </div>
+
+  <div class="quiz" data-answer="a">
+    <p class="q">3. 适配器在 `llm.py` 里主要翻译了哪两样东西？</p>
+    <button class="quiz-option" data-key="a">接口形状与异常形状</button>
+    <button class="quiz-option" data-key="b">中文文本与英文文本</button>
+    <button class="quiz-option" data-key="c">向量数据与文本数据</button>
+    <button class="quiz-option" data-key="d">同步调用与异步调用</button>
+    <p class="feedback"
+       data-correct="对。一是把 SDK 的调用方式收成 chat(messages)；二是把 SDK 异常收成 LLMError。"
+       data-wrong="再想想：适配器负责"把外面的说法翻译成我们的说法"，翻译的是形状。"></p>
+  </div>
+
+  <div class="quiz" data-answer="a">
+    <p class="q">4. "OpenAI 兼容协议"里的"协议"，和 `typing.Protocol` 是什么关系？</p>
+    <button class="quiz-option" data-key="a">不同层面的约定，但精神相同</button>
+    <button class="quiz-option" data-key="b">完全是同一个东西的两种叫法</button>
+    <button class="quiz-option" data-key="c">后者是前者在代码里的一个实现</button>
+    <button class="quiz-option" data-key="d">两者之间其实没有任何相似之处</button>
+    <p class="feedback"
+       data-correct="对。一个是代码内部的形状约定，一个是网络接口的形状约定；本质都是"先约好形状"。"
+       data-wrong="再想想：层面不同（代码 vs 网络），但都是"约定形状以便对接"。"></p>
+  </div>
+
+  <div class="quiz" data-answer="a">
+    <p class="q">5. 本项目里重排为什么不能用 openai SDK？</p>
+    <button class="quiz-option" data-key="a">因为它不走 OpenAI 兼容协议</button>
+    <button class="quiz-option" data-key="b">因为它完全不支持中文文本输入</button>
+    <button class="quiz-option" data-key="c">因为它必须用异步方式才能被调用</button>
+    <button class="quiz-option" data-key="d">因为它的响应结构过于复杂难解析</button>
+    <p class="feedback"
+       data-correct="对。它的 URL 没有 compatible-mode，请求体形状也不同，所以只能用 httpx 手写。"
+       data-wrong="再想想：看 config.py 里三个 URL——只有它是 /api/v1/services/... 这种自有路径。"></p>
+  </div>
+
+  <div class="quiz" data-answer="a">
+    <p class="q">6. `enable_thinking` 为什么必须放进 `extra_body`？</p>
+    <button class="quiz-option" data-key="a">它是厂商私有参数，SDK 并不认识</button>
+    <button class="quiz-option" data-key="b">它的取值必须是一个字符串类型</button>
+    <button class="quiz-option" data-key="c">它只在使用流式输出的时候才有效</button>
+    <button class="quiz-option" data-key="d">它其实属于响应字段而不是请求字段</button>
+    <p class="feedback"
+       data-correct="对。extra_body 是"兼容协议没覆盖到的地方"的逃生口。"
+       data-wrong="再想想：OpenAI SDK 按 OpenAI 规格校验参数，不认识的会直接报错。"></p>
+  </div>
+
+  <div class="quiz" data-answer="c">
+    <p class="q">7. 判断"某个外部依赖要不要抽成适配器"，下面哪组问题最有用？</p>
+    <button class="quiz-option" data-key="a">它的代码行数是不是很多、看起来是不是很复杂</button>
+    <button class="quiz-option" data-key="b">它是不是由第三方提供的、有没有开源许可证</button>
+    <button class="quiz-option" data-key="c">它会不会变、有没有第二个实现（含测试替身）、有没有外部怪癖</button>
+    <button class="quiz-option" data-key="d">它属于网络请求还是本地磁盘操作</button>
+    <p class="feedback"
+       data-correct="对。三问皆否就别抽——chunking.py 就是反例（纯函数，套协议只多一层跳转）；文件系统目前也没抽。"
+       data-wrong="再想想：判断依据是"变化与多实现的可能性"，不是行数、出处或存储类型。"></p>
+  </div>
+
+  <h2>十四、想深入时读这个</h2>
+  <p><strong>首选一手资源：</strong><a href="https://docs.python.org/zh-cn/3/library/typing.html#typing.Protocol">Python 官方文档 · typing.Protocol</a>（官方中文）——看它和抽象基类的区别，以及"结构化子类型"到底怎么工作。</p>
+  <p class="muted">接口侧可对照 <a href="https://help.aliyun.com/zh/model-studio/qwen-api-via-openai-chat-completions">百炼 · OpenAI 兼容 Chat</a>，自己找找哪些参数是标准字段、哪些是私有扩展。完整资源见 <a href="../RESOURCES.md">RESOURCES.md</a>。</p>
+
+  <div class="foot">
+    不清楚就直接问，比如"Protocol 和 ABC 到底该用哪个""为什么 Python 不强制检查协议"。我是你的老师，问多基础都可以。
+  </div>
+
+</div>
+<script src="../assets/quiz.js"></script>
+</body>
+</html>

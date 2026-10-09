@@ -1,0 +1,235 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>课程 0016 · 应用是怎么装起来的：main.py、app = create_app()、静态托管</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+<div class="wrap">
+
+  <p class="eyebrow">课程 0016 · 代码精读 · 对应 api/main.py</p>
+  <h1>应用是怎么"装"起来的</h1>
+  <p class="lede">你对 <code>api/main.py</code> 的三个疑问，其实指向同一个问题：<strong>一个 Web 应用是怎么从"一堆零件"变成"一个能跑的东西"的？</strong>这一课就顺着这个文件从头读到尾——为什么要它、最后一行在干嘛、"托管静态资源"又是什么。</p>
+
+  <div class="win">
+    <strong>学完你能做到：</strong>解释 <code>uvicorn api.main:app</code> 里的 <code>app</code> 到底从哪来；看懂 <code>app = create_app()</code> 为什么既是"工厂"又是"单例"；并说清"前端打包产物为什么可以让后端一起发"。
+    <br><span class="muted">配套：<a href="../reference/fastapi-usage.html">FastAPI 用法手册</a> · <a href="../reference/python-concepts-glossary.html">术语表</a> · 前置 <a href="0014-how-to-write-t10.html">课程 0014</a></span>
+  </div>
+
+  <h2>一、为什么要有 main.py 这个文件</h2>
+  <p>先分清项目里的两类东西：</p>
+  <table>
+    <thead><tr><th>目录</th><th>是什么</th><th>认识 Web 吗</th></tr></thead>
+    <tbody>
+      <tr><td><code>kbqa/</code></td><td>能力库：加载、切分、向量、检索、生成……</td><td><strong>不认识</strong>（Notebook 里也能用）</td></tr>
+      <tr><td><code>api/</code></td><td>把这些能力接到 HTTP 上</td><td>认识</td></tr>
+    </tbody>
+  </table>
+  <p>而 <code>api/main.py</code> 是<strong>入口文件（entry point）</strong>：FastAPI 必须先有一个"应用对象"才能跑，<code>main.py</code> 就是<strong>把零件组装成应用、并把应用暴露出来</strong>的地方。</p>
+  <p>它里面的 <code>create_app()</code> 就是一张"装配清单"，按顺序做五件事：</p>
+  <table>
+    <thead><tr><th>步</th><th>代码</th><th>在干嘛</th></tr></thead>
+    <tbody>
+      <tr><td>1</td><td><code>VectorStore.load(...)</code></td><td>把磁盘上的向量索引加载进内存</td></tr>
+      <tr><td>2</td><td><code>RAGPipeline(store, embedder, ...)</code></td><td>把各组件的实现组装成链路（依赖注入）</td></tr>
+      <tr><td>3</td><td><code>app.state.pipeline = pipeline</code></td><td>把有状态的对象挂到应用身上，供路由取用</td></tr>
+      <tr><td>4</td><td><code>install_exception_handlers</code> + <code>include_router</code></td><td>登记错误处理表和所有路由</td></tr>
+      <tr><td>5</td><td><code>app.mount("/", StaticFiles(...))</code></td><td>（可选）顺便托管前端打包产物</td></tr>
+    </tbody>
+  </table>
+  <div class="note">
+    <span class="label">一个类比</span>
+    <code>kbqa/</code> 是发动机、轮子、方向盘等零件；<code>create_app()</code> 是把它们<strong>装成一台车</strong>；<code>app = create_app()</code> 是<strong>把装好的车摆到车位上、插上钥匙</strong>。uvicorn 就是发动它的人。
+  </div>
+  <p class="muted">为什么单独一个文件，而不是塞进 <code>routes.py</code>？因为职责不同：<strong>routes 关心"某个 URL 怎么处理"，main 关心"整个应用怎么启动"</strong>。入口只有一处，启动相关的事都改这里，排查启动问题时不用到处翻。</p>
+
+  <h2>二、最后一行 <code>app = create_app()</code> 为什么必须这样写</h2>
+  <p>这一行只有 20 个字符，但要拆成三个问题才讲得清。</p>
+
+  <h3>2.1 因为 uvicorn 找的是"模块里的一个变量"</h3>
+  <p>启动命令的语法是 <code>模块路径:变量名</code>：</p>
+  <pre><code>python -m uvicorn api.main:app
+#                     └───┬───┘ └┬┘
+#                    api/main.py  这个文件里名叫 app 的变量</code></pre>
+  <p>uvicorn 会：<strong>import 这个模块 → 在里面找名叫 <code>app</code> 的变量 → 拿它当应用跑</strong>。所以 <strong>必须有一个模块级的变量叫 <code>app</code></strong>。这就是最后一行存在的第一个理由。</p>
+
+  <h3>2.2 为什么是"调用工厂函数"，而不是直接 <code>app = FastAPI()</code></h3>
+  <p>因为装配步骤有 5 步（见第一节的表）。把这些步骤<strong>打包成一个函数</strong>有两个好处：</p>
+  <ul>
+    <li>能把它们组织起来、中间还能 <code>return</code>，读起来是"一份清单"而不是散落的语句；</li>
+    <li>最关键：<strong>工厂函数可以被反复调用</strong>——测试时 <code>create_app()</code> 能造一个全新的、干净的应用；如果直接 <code>app = FastAPI()</code> 加一堆全局配置，就只有一份，测试之间会互相污染。</li>
+  </ul>
+
+  <h3>2.3 为什么写在"模块最外层"，而且只执行一次</h3>
+  <p>这是本题的核心机制，来自 Python 的 import 规则：</p>
+  <div class="diagram">
+    <div class="dbox"><strong>uvicorn 执行 import api.main</strong><span>第一次</span></div>
+    <div class="darrow">↓ Python 从上到下执行这个文件里所有"顶层语句"</div>
+    <div class="dbox"><strong>执行到 app = create_app()</strong><span>装配发生在这里，只此一次</span></div>
+    <div class="darrow">↓ 执行完，把模块存进 sys.modules 缓存</div>
+    <div class="dbox lead"><strong>之后再 import api.main</strong><span>直接取缓存，不再重跑 → app 还是那一个</span></div>
+    <div class="dcap">图 1 · "模块级单例"：import 只执行一次，所以 app 只造一份</div>
+  </div>
+  <p>换句话说：<strong><code>app = create_app()</code> 既是"调用工厂造对象"，又天然是"全项目唯一一份"</strong>——和 T0 里 <code>settings = Settings()</code>、<code>python</code> 里 <code>logging</code> 的模块级对象是同一个套路（术语表叫"模块级单例"）。</p>
+
+  <h3>2.4 实测证据</h3>
+  <pre><code>import api.main as m1, api.main as m2
+print(m1 is m2)          # True   —— 两次 import 是同一个模块对象
+print(m1.app is m2.app)  # True   —— 拿到的 app 是同一个
+f = m1.create_app()
+print(f is not m1.app)   # True   —— 但工厂能再造一个全新的（测试用）</code></pre>
+  <p>实测的三行输出正是 <code>True / True / True</code>。（顺带能看到日志里"索引已加载"出现了两次：一次是 import 时的 <code>app = create_app()</code>，一次是显式调用的 <code>create_app()</code>——<strong>这就是"装配在 import 时真的执行了"的直接证据</strong>。）</p>
+
+  <div class="note">
+    <span class="label">一个要知道的副作用</span>
+    <code>app = create_app()</code> 在 <strong>import 的那一刻</strong>就会真的去加载索引、创建各 provider。这是<strong>故意</strong>的：配置错了就"启动即报错"（fail fast），而不是等第一个请求进来才发现。
+    但也要记住：<strong>import <code>api.main</code> 是有副作用的</strong>，别在无关的地方随手 import 它。
+  </div>
+
+  <div class="note">
+    <span class="label">顺带：还有另一种启动写法</span>
+    uvicorn 也支持"直接指向工厂函数"：<code>uvicorn api.main:create_app --factory</code>。这样就不需要最后那行 <code>app = create_app()</code> 了。
+    本项目选了"模块级变量 <code>app</code>"，因为它是<strong>更通用的写法</strong>——部署工具、其他框架大多默认去找一个叫 <code>app</code> 的变量。两种都对，知道有这回事即可。
+  </div>
+
+  <h2>三、"托管前端静态资源"是什么意思</h2>
+  <p>先把词拆开。<strong>静态资源（static assets）= 现成的文件</strong>：HTML、CSS、JavaScript、图片、字体。它们的共同点是——<strong>每次都一样，不需要后端计算</strong>。相对的叫<strong>动态接口</strong>：同一个 URL，参数不同、或数据变了，返回就不一样（比如 <code>/api/qa</code> 每次问的问题不同，答案就不同）。</p>
+
+  <h3>3.1 前端怎么变成了"静态文件"</h3>
+  <p>你写的 Vue 源码（<code>.vue</code> + TS）浏览器并不能直接跑，要先"打包"。T11 会用 <code>npm run build</code> 把它编译成 <code>web/dist/</code> 目录——里面就是 <code>index.html</code> 加一堆 <code>.js</code> / <code>.css</code>。<strong>打包之后，前端就退化成了纯粹的静态文件。</strong></p>
+
+  <h3>3.2 开发模式 vs 生产模式</h3>
+  <table>
+    <thead><tr><th></th><th>开发模式</th><th>生产模式</th></tr></thead>
+    <tbody>
+      <tr><td>前端</td><td>Vite dev server（5173 端口），改代码即时刷新</td><td>已打包成 <code>web/dist/</code> 静态文件</td></tr>
+      <tr><td>后端</td><td>FastAPI（8000 端口）</td><td>FastAPI（8000 端口）</td></tr>
+      <tr><td>怎么联通</td><td>Vite 的 proxy 把 <code>/api</code> 转给 8000（避免跨域）</td><td><strong>同一个进程、同一个端口</strong>，不存在跨域</td></tr>
+    </tbody>
+  </table>
+  <p>问题就在生产模式：<strong>那堆静态文件总得有人"发给浏览器"，谁来发？</strong></p>
+  <ul>
+    <li>做法一：另起一个 Nginx 专门发静态文件，API 仍由 FastAPI 管——多一个进程、多一份配置；</li>
+    <li>做法二（本项目）：<strong>让 FastAPI 顺便把 <code>web/dist</code> 也发了</strong>。一个进程、一个端口搞定，这就是"托管静态资源"。</li>
+  </ul>
+
+  <h3>3.3 StaticFiles + mount 到底做了什么</h3>
+  <pre><code>app.mount("/", StaticFiles(directory="web/dist", html=True), name="web")</code></pre>
+  <table>
+    <thead><tr><th>部分</th><th>含义</th></tr></thead>
+    <tbody>
+      <tr><td><code>StaticFiles(directory="web/dist")</code></td><td>把本地目录变成一个"HTTP 文件服务"：请求什么文件，就去这个目录找同名文件返回</td></tr>
+      <tr><td><code>html=True</code></td><td>访问"目录"时自动返回 <code>index.html</code>（单页应用的入口）</td></tr>
+      <tr><td><code>app.mount("/", ...)</code></td><td><strong>挂载</strong>：在这条 URL 前缀上接一个独立的处理程序，前缀下的请求全归它管</td></tr>
+    </tbody>
+  </table>
+  <p>它和路由的区别：路由是"精确匹配某条 URL"，挂载是"<strong>一整片 URL 区域都交给它</strong>"。<code>mount("/")</code> 的意思是"凡是没有被前面路由接走的请求，都去 <code>web/dist</code> 里找文件"。</p>
+
+  <div class="diagram">
+    <div class="dbox"><strong>浏览器</strong><span>只访问 localhost:8000</span></div>
+    <div class="darrow">↓ 请求先经过已注册的路由</div>
+    <div class="drow">
+      <div class="dbox"><strong>/api/qa</strong><span>→ 路由 → RAGPipeline</span></div>
+      <div class="dbox lead"><strong>其他路径 /、/assets/app.js</strong><span>→ StaticFiles → web/dist 里的文件</span></div>
+    </div>
+    <div class="dcap">图 2 · 一个端口同时服务接口和页面</div>
+  </div>
+
+  <h3>3.4 为什么外面还套一个 <code>if is_dir()</code></h3>
+  <pre><code>if _WEB_DIST.is_dir():          # web/dist 存在才挂载
+    app.mount("/", StaticFiles(...))</code></pre>
+  <p>T10 做的时候，T11（前端）还没开始，<code>web/dist</code> 根本不存在。<code>StaticFiles(directory=...)</code> 遇到不存在的目录会<strong>启动即报错</strong>，所以要先判断。<strong>一句话：为将来留好口子，但不能依赖还没发生的事。</strong></p>
+
+  <h3>3.5 顺序坑（再强调一次）</h3>
+  <p><code>mount("/")</code> 必须放在 <code>app.include_router(router)</code> <strong>之后</strong>。<code>"/"</code> 很贪心，会兜住所有没被匹配的路径；放在前面就会把 <code>/api/health</code> 也当成"去 web/dist 里找 api 文件夹"，全部 404。<strong>先具体，后兜底。</strong></p>
+
+  <h2>四、三问速答</h2>
+  <table>
+    <thead><tr><th>你的疑问</th><th>一句话答案</th></tr></thead>
+    <tbody>
+      <tr><td>为什么要有 main.py</td><td>它是<strong>入口</strong>：把 <code>kbqa</code> 的零件装配成一个 FastAPI 应用并暴露出来，uvicorn 就是来拿它的</td></tr>
+      <tr><td>最后一行为什么写 <code>app = create_app()</code></td><td>uvicorn 需要模块里有个叫 <code>app</code> 的变量；用工厂函数是为了能重复装配（测试）；写在最外层利用"import 只执行一次"得到<strong>模块级单例</strong></td></tr>
+      <tr><td>托管前端静态资源是什么意思</td><td>把打包好的 <code>web/dist</code>（HTML/CSS/JS）交给 FastAPI 一起发，<strong>一个端口同时服务页面和接口</strong>，省掉 Nginx 与跨域</td></tr>
+    </tbody>
+  </table>
+
+  <h2>五、亲手做一遍</h2>
+
+  <div class="note">
+    <span class="label">练习 A · 亲眼看到"import 只执行一次"</span>
+    在项目根目录运行：
+    <pre><code>python -c "import api.main as a, api.main as b; print(a is b, a.app is b.app)"</code></pre>
+    再运行 <code>python -c "from api.main import create_app; print(create_app() is create_app())"</code>。两次结果说明什么？
+  </div>
+
+  <div class="note">
+    <span class="label">练习 B · 感受"启动即报错"（fail fast）</span>
+    临时把 <code>.env</code> 里的 <code>DASHSCOPE_API_KEY</code> 删掉（或改名），再 <code>python -c "import api.main"</code>。
+    观察它是不是<strong>在 import 阶段就直接报错</strong>，而不是等你访问 <code>/api/qa</code> 才报。看完改回来。
+  </div>
+
+  <div class="note">
+    <span class="label">练习 C · 看懂挂载顺序</span>
+    把 <code>app.mount("/", ...)</code> 那两行临时挪到 <code>app.include_router(router)</code> <strong>之前</strong>（先建一个空的 <code>web/dist</code> 让它能挂上），再访问 <code>/api/health</code>，看会发生什么。想清楚后改回来。
+  </div>
+
+  <h2>六、自测（凭记忆答）</h2>
+
+  <div class="quiz" data-answer="a">
+    <p class="q">1. `uvicorn api.main:app` 里的 `app` 指的是什么？</p>
+    <button class="quiz-option" data-key="a">api/main.py 里那个名叫 app 的模块级变量</button>
+    <button class="quiz-option" data-key="b">FastAPI 这个库的名字的简写</button>
+    <button class="quiz-option" data-key="c">项目根目录下的一个文件夹</button>
+    <button class="quiz-option" data-key="d">create_app 这个函数的返回值类型</button>
+    <p class="feedback"
+       data-correct="对。语法是"模块路径:变量名"，uvicorn 会 import 模块再找这个变量。"
+       data-wrong="再想想：冒号后面是"变量名"，不是库名、也不是文件夹。"></p>
+  </div>
+
+  <div class="quiz" data-answer="c">
+    <p class="q">2. 为什么 `app = create_app()` 写在模块最外层，就天然只有一份？</p>
+    <button class="quiz-option" data-key="a">因为 Python 不允许同一个文件里写两次赋值</button>
+    <button class="quiz-option" data-key="b">因为 FastAPI 会在背后把它变成单例模式</button>
+    <button class="quiz-option" data-key="c">因为模块只会被 import 执行一次，之后走缓存</button>
+    <button class="quiz-option" data-key="d">因为 create_app 函数内部加了缓存装饰器</button>
+    <p class="feedback"
+       data-correct="对。顶层语句在 import 时执行一次，模块被缓存，之后再 import 不再重跑。"
+       data-wrong="再想想：这是 Python 的 import 机制，跟 FastAPI、跟装饰器都无关。"></p>
+  </div>
+
+  <div class="quiz" data-answer="b">
+    <p class="q">3. 那为什么不直接用 `app = FastAPI()` 加几行配置，非要包一个工厂函数？</p>
+    <button class="quiz-option" data-key="a">因为 FastAPI 不允许在模块顶层创建应用对象</button>
+    <button class="quiz-option" data-key="b">因为工厂能被反复调用，测试时可以造一个全新的干净应用</button>
+    <button class="quiz-option" data-key="c">因为工厂函数能让应用启动得更快</button>
+    <button class="quiz-option" data-key="d">因为只有工厂函数才能注册路由</button>
+    <p class="feedback"
+       data-correct="对。装配步骤多，打包成函数既能组织代码，又能重复造独立实例。"
+       data-wrong="再想想：关键差别在"能不能再造一个全新的"，这正是测试需要的。"></p>
+  </div>
+
+  <div class="quiz" data-answer="d">
+    <p class="q">4. "用 FastAPI 托管静态资源"是什么意思？</p>
+    <button class="quiz-option" data-key="a">把后端接口的返回值缓存成静态文件加速访问</button>
+    <button class="quiz-option" data-key="b">让 FastAPI 在启动时自动打包前端源码</button>
+    <button class="quiz-option" data-key="c">把数据库里的数据导出成文件供前端下载</button>
+    <button class="quiz-option" data-key="d">让 FastAPI 顺便把 web/dist 里的现成文件发给浏览器</button>
+    <p class="feedback"
+       data-correct="对。打包后的前端就是一堆静态文件，交给后端一起发，一个端口就够了。"
+       data-wrong="再想想：静态资源是"打包好的现成文件"（HTML/CSS/JS），不是接口结果、也不是数据库导出。"></p>
+  </div>
+
+  <h2>七、想深入时读这个</h2>
+  <p><strong>首选一手资源：</strong>对照 <code>api/main.py</code> 与 <code>api/routes.py</code> 再走一遍第一节的五步装配；再看 <a href="../lessons/0013-dependency-injection.html">课程 0013</a>，那里的"依赖注入"说的就是 <code>create_app</code> 里第 2 步在做的事。</p>
+  <p class="muted">外部延伸：<a href="https://fastapi.tiangolo.com/zh/tutorial/bigger-applications/">FastAPI 官方教程 · 更大的应用（多个文件）</a>（官方中文）、<a href="https://fastapi.tiangolo.com/zh/tutorial/static-files/">FastAPI 官方教程 · 静态文件</a>（官方中文）、<a href="https://docs.python.org/zh-cn/3/tutorial/modules.html">Python 官方教程 · 模块</a>（官方中文，讲 import 机制）。完整资源见 <a href="../RESOURCES.md">RESOURCES.md</a>。</p>
+
+  <div class="foot">
+    不清楚就直接问，比如"import 缓存到底存在哪""mount 和路由到底差在哪"。我是你的老师，问多基础都可以。
+  </div>
+
+</div>
+<script src="../assets/quiz.js"></script>
+</body>
+</html>

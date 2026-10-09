@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>速查卡 · T0 骨架</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+<div class="wrap">
+
+  <p class="eyebrow">速查卡 · 配合课程 0001</p>
+  <h1>T0 骨架速查卡</h1>
+  <p class="lede">压成一页的要点。写新模块时照着走；忘了为什么，回 <a href="../lessons/0001-how-to-write-t0.html">课程 0001</a>。</p>
+
+  <h2>四步法</h2>
+  <table>
+    <thead><tr><th>步</th><th>做什么</th><th>判断标准</th></tr></thead>
+    <tbody>
+      <tr><td>1</td><td>规格变成清单，不写代码</td><td>字段名 / 类型 / 默认值都列全了</td></tr>
+      <tr><td>2</td><td>从最底层文件开始写</td><td>排在第一的那个，import 了 0 个项目内文件</td></tr>
+      <tr><td>3</td><td>一个文件 + 一行命令验证</td><td>出错时只有一处可能是元凶</td></tr>
+      <tr><td>4</td><td>整体连起来跑最终验收</td><td>失败必在"集成"层，不在细节</td></tr>
+    </tbody>
+  </table>
+
+  <h2>T0 的四个文件</h2>
+  <table>
+    <thead><tr><th>顺序</th><th>文件</th><th>职责</th><th>依赖</th></tr></thead>
+    <tbody>
+      <tr><td>1</td><td><code>models.py</code></td><td>@dataclass 数据结构</td><td>无</td></tr>
+      <tr><td>2</td><td><code>config.py</code></td><td>.env → Settings 对象</td><td>pydantic-settings</td></tr>
+      <tr><td>3</td><td><code>logging_conf.py</code></td><td>日志格式与级别</td><td>config</td></tr>
+      <tr><td>4</td><td><code>__init__.py</code></td><td>只调用一次 setup_logging()</td><td>logging_conf</td></tr>
+    </tbody>
+  </table>
+
+  <h2>三个"为什么"（最容易被问到）</h2>
+  <ul>
+    <li><strong>密钥不给默认值</strong> → fail fast：缺配置就启动即崩，别带着错配置跑。</li>
+    <li><strong>settings 只实例化一次</strong> → 全项目共用一份配置，避免配置漂移。</li>
+    <li><strong>日志只在一处配置</strong> → 各模块只 <code>getLogger(__name__)</code>，格式才统一。</li>
+  </ul>
+
+  <h2>验收命令</h2>
+  <pre><code>python -c "import kbqa; print('ok')"
+python -c "from kbqa.config import settings; print(settings.chat_model, settings.embedding_dim, settings.rerank_model, settings.log_level)"
+python -c "import logging, kbqa; logging.getLogger('kbqa').info('test')"
+$env:LOG_LEVEL='DEBUG'; python -c "import logging, kbqa; logging.getLogger('kbqa').debug('x')"</code></pre>
+  <p class="muted">没有 <code>.env</code> 时先设 <code>$env:DASHSCOPE_API_KEY='sk-test'</code>。</p>
+
+  <h2>踩坑提醒</h2>
+  <ul>
+    <li>别从 <code>__init__.py</code> 开写——它会调用还不存在的东西，你会卡死在第一步。</li>
+    <li>别把四个文件全写完再一起测——报错时你无法定位是哪一步。</li>
+    <li><code>.env</code> 必须在 <code>.gitignore</code> 里；仓库只留 <code>.env.example</code>。</li>
+  </ul>
+
+  <div class="foot">
+    回 <a href="../lessons/0001-how-to-write-t0.html">课程 0001</a> · <a href="https://docs.python.org/zh-cn/3/tutorial/modules.html">Python 官方 · 模块（中文）</a>
+  </div>
+
+</div>
+</body>
+</html>

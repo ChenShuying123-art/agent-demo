@@ -1,0 +1,174 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>课程 0006 · 让数据永不"错位"：拆解 T4</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+<div class="wrap">
+
+  <p class="eyebrow">课程 0006 · RAG 项目实战 · 对应任务 T4</p>
+  <h1>让数据永不"错位"：拆解 T4</h1>
+  <p class="lede">T4 表面上是"把向量存起来"，真正的难点却是<strong>三份文件必须永远对齐</strong>——一旦错位，检索会拿到"别人的向量 + 这段文字"，而且<strong>不报错</strong>。这一课讲的就是：怎么让这种错误<em>不可能发生</em>，以及发生了怎么<em>立刻发现</em>。</p>
+
+  <div class="win">
+    <strong>学完你能做到：</strong>设计任何"多份数据要保持同步"的存储时，能说清谁是"真相源"、怎么用一次操作同时更新两边、以及把自己最怕的错误写成一条断言。
+    <br><span class="muted">配套：<a href="../reference/python-concepts-glossary.html">术语表</a> · 前置 <a href="0004-how-to-write-t2.html">0004</a> / <a href="0005-how-to-write-t3.html">0005</a></span>
+  </div>
+
+  <h2>一、T4 的坑：三份数据，一条命</h2>
+  <p>索引落在三个文件里：</p>
+  <table>
+    <thead><tr><th>文件</th><th>内容</th></tr></thead>
+    <tbody>
+      <tr><td><code>vectors.npy</code></td><td>第 i 行 = 第 i 个 chunk 的向量</td></tr>
+      <tr><td><code>chunks.jsonl</code></td><td>第 i 行 = 第 i 个 chunk 的原文</td></tr>
+      <tr><td><code>docs.json</code></td><td>每篇文档索引了多少 chunk</td></tr>
+    </tbody>
+  </table>
+  <p>关键约束：<strong>第 i 行向量必须和第 i 行文字属于同一个 chunk</strong>。这叫做"行序同步"。</p>
+  <p>如果哪天两者差了 1 行——比如删文档时只删了文字、忘了删向量——后果是什么？向量还在、文字少了一段，于是整条索引<strong>从删除点之后全体错位</strong>。检索命中的是"A 文档的向量"，拿出来的却是"B 文档的文字"，而程序<strong>一声不吭</strong>。</p>
+  <p class="muted">这类 bug 的可怕之处和 T3 的顺序问题一模一样：<strong>它不报错</strong>。所以对付它不能靠"小心"，要靠机制。</p>
+
+  <h2>二、机制一：用同一个操作，同时更新两边</h2>
+  <p>看删除是怎么写的：</p>
+  <pre><code>keep = [i for i, chunk in enumerate(self._chunks) if chunk.doc_id != doc_id]
+self._chunks  = [self._chunks[i] for i in keep]
+self._vectors = self._vectors[keep]</code></pre>
+  <p>它<strong>不是</strong>"先删文字、再删向量"，而是"先算出保留哪些行，再让两边用同一份 <code>keep</code> 各自重建"。这样两边天然同步，<strong>根本不存在"只删了一边"的中间状态</strong>。</p>
+  <p>这是个很值得记住的思路：<strong>不要写"两步操作"，写"一次计算 + 两边应用"。</strong> 要求"两个操作都成功"的地方，最好设计成"只需要一个操作"。</p>
+
+  <h2>三、机制二：把最怕的错误写成断言</h2>
+  <pre><code>def _assert_rows_aligned(self) -> None:
+    if self._vectors.shape[0] != len(self._chunks):
+        logger.error("npy 行数(%d) != jsonl 行数(%d)，行序已失步", ...)
+        raise AssertionError("向量行数与 chunk 数不一致，索引行序失步")</code></pre>
+  <p>这个方法在 <code>add</code> / <code>remove</code> / <code>load</code> 之后都会调用。它做的事只有一件：<strong>核对那条"必须永远成立"的约束</strong>。</p>
+  <p>这正是 T2 学过的<strong>不变量</strong>的又一次应用：先想清楚"什么必须永远为真"，把它写成可执行的检查，而不是靠肉眼。</p>
+  <div class="note">
+    <span class="label">一句话方法论</span>
+    写存储代码时先问自己：<strong>"我最怕哪个数字对不上？"</strong> 然后为它写一条断言。<br>
+    这里最怕的就是：<code>vectors.npy 的行数 ≠ chunks.jsonl 的行数</code>。
+  </div>
+
+  <h2>四、三个"为什么"</h2>
+
+  <h3>① 为什么存之前要 L2 归一化？</h3>
+  <p>归一化后每个向量的长度都是 1，此时<strong>"点积"恰好等于"余弦相似度"</strong>。于是整库相似度可以写成一次矩阵乘法：</p>
+  <pre><code>scores = self._vectors @ query      # 一次算完 N 条，不用逐条算余弦</code></pre>
+  <p class="muted">T3 已经发现：百炼接口<strong>本来就返回单位向量</strong>（L2 范数 = 1.0）。所以这一步在这里是"安全的空操作"——但换个模型可能就不是了，留着它才稳。</p>
+
+  <h3>② 为什么用 <code>argpartition</code> 而不是直接排序？</h3>
+  <p>因为我们要的只是"前 k 个"，不是"完整的顺序"。</p>
+  <ul>
+    <li>全排序：<code>O(N log N)</code>，把 10000 条全部排好，但你只用前 4 条</li>
+    <li><code>argpartition</code>：<code>O(N)</code>，只保证"前 k 个是最大的"</li>
+  </ul>
+  <p>代价是：<code>argpartition</code> <strong>不保证这 k 个内部有序</strong>，所以要再对选中的 k 个排一次（k 很小，几乎不要钱）。"先粗挑、再精排"——这个套路在后面 Rerank 里还会遇到一次，只不过那次是语义层面的。</p>
+
+  <h3>③ 为什么删除要立刻落盘，而新增不用？</h3>
+  <table>
+    <thead><tr><th>操作</th><th>是否立刻写文件</th><th>理由</th></tr></thead>
+    <tbody>
+      <tr><td><code>remove_document</code></td><td>是</td><td>删除必须马上生效，否则崩溃后"删掉的向量"会从文件里复活</td></tr>
+      <tr><td><code>add</code></td><td>否（交给 <code>save()</code>）</td><td>新增是批量行为，反复重写大文件很浪费</td></tr>
+    </tbody>
+  </table>
+  <p class="muted">"什么时候必须立刻持久化"是个真实的工程判断，没有标准答案——但每个选择都要能说出理由。</p>
+
+  <h2>五、顺带学一个工程习惯：幂等</h2>
+  <p>Notebook 里入库那一步我写成了这样：</p>
+  <pre><code>store.remove_document(doc.doc_id)   # 重新索引 = 先删后加
+store.add(chunk_objs, vectors)</code></pre>
+  <p>为什么先删？因为<strong>直接 add 会累积重复</strong>：Notebook 跑第二遍，同一批 chunk 就进库两次，检索结果里全是重复片段。</p>
+  <p>"先删后加"让这一步变成<strong>幂等</strong>的——执行一次和执行三次，结果一样。写脚本、写 Notebook、写定时任务时，<strong>尽量让每一步都能安全地重复运行</strong>，你会少掉很多"跑第二遍就坏了"的麻烦。</p>
+
+  <h2>六、实测数据</h2>
+  <table>
+    <thead><tr><th>验收点</th><th>实测</th></tr></thead>
+    <tbody>
+      <tr><td><code>stats()</code></td><td><code>{'chunks': 8, 'docs': 2, 'dim': 1024}</code></td></tr>
+      <tr><td>落盘后行数一致</td><td>npy 行数 = 8，jsonl 行数 = 8</td></tr>
+      <tr><td><code>save()</code> → 新实例 <code>load()</code></td><td>同一查询返回结果<strong>逐条完全相同</strong></td></tr>
+      <tr><td>结果排序</td><td>score 降序 <code>[0.0519, 0.0399, 0.0379, 0.0254, -0.0214]</code>，rank 从 0 起</td></tr>
+      <tr><td><code>doc_ids</code> 过滤</td><td>只返回指定文档的 5 条</td></tr>
+      <tr><td><code>remove_document</code> 后</td><td><code>{'chunks': 3, 'docs': 1}</code>，npy = jsonl = 3</td></tr>
+      <tr><td>落盘向量的 L2 范数</td><td>全部 = 1（归一化生效）</td></tr>
+    </tbody>
+  </table>
+  <p class="muted">一个值得注意的数字：随机向量的余弦相似度只有 0.05 左右。等 T5 用真实语义查询时，这个数字会高得多——那时才看得出"区分度"。</p>
+
+  <h2>七、亲手做一遍</h2>
+  <div class="note">
+    <span class="label">练习 A · 亲手制造一次"错位"</span>
+    在 Python 里手动改一个 <code>chunks.jsonl</code>（删掉一行），然后 <code>VectorStore.load()</code>。观察它是否报错、日志是什么级别。想清楚：如果这条断言不存在，你需要多久才能发现这个 bug？
+  </div>
+  <div class="note">
+    <span class="label">练习 B · 亲手验证幂等</span>
+    在 Notebook 里把"入库"那个 cell 连跑两遍，看 <code>stats()["chunks"]</code> 是否变化。然后把 <code>remove_document</code> 那行注释掉再跑两遍，对比差异。
+  </div>
+  <div class="note">
+    <span class="label">练习 C · 想清楚一个设计题</span>
+    如果 <code>doc_ids</code> 过滤不缩小候选集，而是"把不相关文档的分数设成 -∞"，代码会不会更简单？会带来什么副作用？（提示：想想 <code>top</code> 的语义。）
+  </div>
+
+  <h2>八、自测（凭记忆答）</h2>
+
+  <div class="quiz" data-answer="a">
+    <p class="q">1. 存储向量前做 L2 归一化，最主要的目的是什么？</p>
+    <button class="quiz-option" data-key="a">归一化后点积就等于余弦相似度</button>
+    <button class="quiz-option" data-key="b">归一化后向量的维度会变得更小</button>
+    <button class="quiz-option" data-key="c">归一化能提升外部接口的调用速度</button>
+    <button class="quiz-option" data-key="d">归一化能避免向量里出现负数值</button>
+    <p class="feedback"
+       data-correct="对。模长都为 1 时，点积即余弦相似度，一次矩阵乘法算完全库。"
+       data-wrong="再想想：归一化是为了让"点积"能直接当余弦相似度用。"></p>
+  </div>
+
+  <div class="quiz" data-answer="a">
+    <p class="q">2. 为什么用 <code>argpartition</code> 来取 Top-N？</p>
+    <button class="quiz-option" data-key="a">它只需 O(N) 而不必把全部排好</button>
+    <button class="quiz-option" data-key="b">它返回的结果本身就是完全有序的</button>
+    <button class="quiz-option" data-key="c">它能自动把不相关的候选过滤掉</button>
+    <button class="quiz-option" data-key="d">它支持按文档编号做范围过滤</button>
+    <p class="feedback"
+       data-correct="对。只要前 k 个就不必全排序；代价是这 k 个内部无序，需要再排一次。"
+       data-wrong="再想想：全排序是 O(N log N)，而我们只要前 k 个。"></p>
+  </div>
+
+  <div class="quiz" data-answer="a">
+    <p class="q">3. 本模块最需要盯住的隐患是什么？</p>
+    <button class="quiz-option" data-key="a">向量行数与 chunk 行数不再同步</button>
+    <button class="quiz-option" data-key="b">查询向量的维度在配置里被写错</button>
+    <button class="quiz-option" data-key="c">磁盘上的索引文件体积增长过快</button>
+    <button class="quiz-option" data-key="d">相似度分数没有按从高到低排序</button>
+    <p class="feedback"
+       data-correct="对。一旦错位，检索会拿到"别人的向量 + 这段文字"，而且不会报错。"
+       data-wrong="再想想：这模块最大的隐患是"行序失步"，它沉默且后果严重。"></p>
+  </div>
+
+  <div class="quiz" data-answer="a">
+    <p class="q">4. 为什么删除文档要立刻落盘，而新增不用？</p>
+    <button class="quiz-option" data-key="a">删除必须马上生效以免崩后复活</button>
+    <button class="quiz-option" data-key="b">新增的数据量总比删除的数据量更大</button>
+    <button class="quiz-option" data-key="c">删除操作比新增操作更容易写错代码</button>
+    <button class="quiz-option" data-key="d">新增立刻落盘会破坏 chunk 的行序</button>
+    <p class="feedback"
+       data-correct="对。删除拖不得；新增是批量的，统一 save() 一次更划算。"
+       data-wrong="再想想：核心区别在于"删除拖久了会出问题"，新增拖一下没关系。"></p>
+  </div>
+
+  <h2>九、想深入时读这个</h2>
+  <p><strong>首选一手资源：</strong><a href="https://numpy.org/doc/stable/reference/routines.linalg.html">NumPy 官方文档 · Linear algebra（英文，无官方中文）</a>——本课的 <code>linalg.norm</code> 归一化与 <code>@</code> 矩阵乘法都在这里。</p>
+  <p class="muted">完整资源见 <a href="../RESOURCES.md">RESOURCES.md</a>；术语随时查 <a href="../reference/python-concepts-glossary.html">概念术语表</a>。建议顺序：0002 → 0001 → 0003 → 0004 → 0005 → 0006。</p>
+
+  <div class="foot">
+    不清楚就直接问，比如"为什么 <code>np.argsort(kind='stable')</code> 要指定 stable""为什么空索引要用 (0,0) 而不是 (0,D)"。我是你的老师，问多基础都可以。
+  </div>
+
+</div>
+<script src="../assets/quiz.js"></script>
+</body>
+</html>

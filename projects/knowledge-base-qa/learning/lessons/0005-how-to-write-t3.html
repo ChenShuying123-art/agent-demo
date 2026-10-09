@@ -1,0 +1,164 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>课程 0005 · 把代码接上真实世界：拆解 T3</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+<div class="wrap">
+
+  <p class="eyebrow">课程 0005 · RAG 项目实战 · 对应任务 T3</p>
+  <h1>把代码接上真实世界：拆解 T3</h1>
+  <p class="lede">前四课都在你本机跑。这一课是第一次把代码接到<strong>外部服务</strong>——于是多出三样东西：<strong>配额、凭据、失败</strong>。T3 的代码不长，但真实的坑这次真的踩到了，值得记一辈子。</p>
+
+  <div class="win">
+    <strong>学完你能做到：</strong>调用任何"有单次条数上限"的外部接口时，能正确分批、并证明顺序没错；也终于弄清 <code>.env</code> 和 <code>.env.example</code> 的区别。
+    <br><span class="muted">配套：<a href="../reference/python-concepts-glossary.html">术语表</a> · 前置 <a href="0003-how-to-write-t1.html">0003</a> / <a href="0004-how-to-write-t2.html">0004</a></span>
+  </div>
+
+  <h2>一、接上外部服务，多出哪三件事</h2>
+  <table>
+    <thead><tr><th>新增的东西</th><th>对代码的影响</th></tr></thead>
+    <tbody>
+      <tr><td><strong>配额/上限</strong></td><td>接口不是无限收的。这次是"单次最多 10 条"——于是必须分批。</td></tr>
+      <tr><td><strong>凭据</strong></td><td>要带上 API Key，于是有了"密钥该放哪"的问题（这一课的重点之一）。</td></tr>
+      <tr><td><strong>失败</strong></td><td>网络会抖、额度会用完。于是要有重试，且失败时要能看出原因。</td></tr>
+    </tbody>
+  </table>
+  <p class="muted">这也是为什么 T3 之前可以先"离线"做的都做了——把能本地验证的先钉死，接外部服务时才只需面对真正的新问题。</p>
+
+  <h2>二、分批：不是优化，是硬限制</h2>
+  <p>官方文档写得很明确：<code>text-embedding-v4</code> 的"最大行数"是 <strong>10</strong>（见 <a href="https://help.aliyun.com/zh/model-studio/embedding">阿里云百炼官方文档</a>）。所以这不是"分批更快"，而是<strong>不分批就直接报错</strong>。</p>
+  <p>代码里对应的是最简单的那种写法——按顺序切、同步发、顺序拼回去：</p>
+  <pre><code>for batch_no, start in enumerate(range(0, len(texts), self._batch_size), start=1):
+    batch = texts[start : start + self._batch_size]
+    vectors.extend(self._embed_one_batch(batch_no, batch))   # 按批顺序拼回</code></pre>
+  <p>顺带一提：代码里还有一道"防呆"——如果配置把 batch_size 调到 20，会<strong>强制拉回 10 并打 WARNING</strong>。宁可配置被纠正，也不要等到调用时才炸。</p>
+
+  <h2>三、顺序：最隐蔽的坑（错了不报错）</h2>
+  <p>想想看，如果分批后顺序乱了会怎样？</p>
+  <p><strong>不会报错。</strong> 程序照常返回 15 个向量，长度也对。但第 3 个向量其实是第 7 条文本的——于是"这条 chunk 对应哪个向量"全错位，检索出来的结果整体偏移，而且你<em>看不出问题在哪</em>。</p>
+  <p class="muted">这就是为什么 T3 的验收把这个单独列一条。一个 bug 最可怕的地方不是它存在，而是它<strong>沉默</strong>。</p>
+
+  <h3>怎么证明顺序没错？——逆序验证法</h3>
+  <p>把同一批文本<strong>整体倒过来</strong>再跑一遍：如果顺序逻辑是对的，结果应该正好是原来的逆序。用余弦相似度逐位比较：</p>
+  <pre><code>v1 = embedder.embed(texts)
+v2 = embedder.embed(list(reversed(texts)))
+worst = min(cos(v2[i], v1[len(v1) - 1 - i]) for i in range(len(v1)))
+# ≈ 1 才说明顺序没乱</code></pre>
+  <p>实测结果：<strong>最差余弦 = 1.000000</strong>。这个"变换输入、预测输出"的验证思路，比"肉眼看结果对不对"强得多。</p>
+
+  <h2>四、实测观测数据</h2>
+  <p>用真实接口跑出来的数字（对应 spec §10 索引第 3 步的观测点）：</p>
+  <table>
+    <thead><tr><th>观测点</th><th>实测值</th><th>说明</th></tr></thead>
+    <tbody>
+      <tr><td>分批次数</td><td>15 条 → 2 批（10 + 5）</td><td>验证了"内部自动分批"</td></tr>
+      <tr><td>向量维度</td><td>1024</td><td>与 <code>embedding_dim</code> 一致</td></tr>
+      <tr><td><strong>L2 范数</strong></td><td><strong>1.0000</strong></td><td>接口本身就返回单位向量</td></tr>
+      <tr><td>前 5 维</td><td>[-0.014346, -0.01275, 0.038668, -0.007353, 0.033195]</td><td>数值很小、有正有负，正常</td></tr>
+      <tr><td>语义相近 / 无关</td><td>0.9301 / 0.8952</td><td>相近确实更高，但差距不大</td></tr>
+    </tbody>
+  </table>
+  <div class="note">
+    <span class="label">两个值得记住的观察</span>
+    <strong>①</strong> L2 范数正好是 1.0 —— 说明接口<strong>已经帮你归一化</strong>了。所以 T4 里"再归一化一次"是个安全的空操作，不是多余步骤（换个模型就可能需要）。
+    <br>
+    <strong>②</strong> 语义相近 0.93、完全无关也有 0.90 —— 差距很小。说明<strong>这类模型的分数尺度整体偏高</strong>。所以判断"有多相关"要看<strong>排序</strong>，不要看绝对值（spec §11 也提到这一点）。这个特性到 T8 重排时会更明显地感受到。
+  </div>
+
+  <h2>五、真实踩到的坑：Key 填进了 <code>.env.example</code></h2>
+  <p>这一条是这次做 T3 时<strong>真的发生</strong>的，不是编的。</p>
+  <p>现象：你说"Key 已经配好了"，但程序读不到。原因是 —— <strong>Key 被填进了 <code>.env.example</code></strong>。而这个文件是 git 跟踪的模板，结果它跟着一次提交进入了 git 历史。所幸那次提交<strong>还没有 push</strong>，才没有真的泄露到远程。</p>
+  <table>
+    <thead><tr><th>文件</th><th>角色</th><th>能不能提交</th></tr></thead>
+    <tbody>
+      <tr><td><code>.env.example</code></td><td>模板，只有占位符 <code>sk-xxxxxxxx</code></td><td>要提交（告诉别人需要哪些配置）</td></tr>
+      <tr><td><code>.env</code></td><td>你的真实配置（含 Key）</td><td><strong>绝不提交</strong>（已在 <code>.gitignore</code> 里）</td></tr>
+    </tbody>
+  </table>
+  <p><strong>正确流程永远是这两步：</strong></p>
+  <ol class="steps">
+    <li><code>copy .env.example .env</code>（复制出真配置）</li>
+    <li>把真实 Key 只填进 <code>.env</code>；<code>.env.example</code> 保持占位符不动</li>
+  </ol>
+  <div class="note">
+    <span class="label">如果不小心把 Key 提交了怎么办</span>
+    按严重度排序处理：<strong>① 立刻去控制台作废并重新生成 Key</strong>（这一步最重要，换钥匙比擦痕迹简单得多）；② 把 Key 从工作区挪进 <code>.env</code>，还原 <code>.env.example</code>；③ 若那次提交还没 push，用 <code>git commit --amend</code> 把它改写掉；已经 push 了则视为"已泄露"，只能靠换 Key 解决。
+  </div>
+  <p class="muted">还有一个细节：<code>.env</code> 能生效的前提是你的<strong>工作目录</strong>就是项目根目录——配置是"相对当前目录"去找 <code>.env</code> 的。所以别在别的目录里跑脚本，否则会读不到。</p>
+
+  <h2>六、亲手做一遍</h2>
+  <div class="note">
+    <span class="label">练习 A · 亲手看一次分批</span>
+    跑 Notebook 01 后半部分，观察日志里的「批次数=2」，再把 <code>EMBEDDING_BATCH_SIZE</code> 改成 20 重跑，看它是否被强制拉回 10 并打出 WARNING。
+  </div>
+  <div class="note">
+    <span class="label">练习 B · 亲手做一次逆序验证</span>
+    不看 Notebook，自己写三行：把 15 条文本逆序再 embedding 一次，用余弦相似度确认结果正好是逆序。想清楚：为什么这个办法能证明"顺序映射"是对的？
+  </div>
+  <div class="note">
+    <span class="label">练习 C · 检查你自己的仓库</span>
+    运行 <code>git grep -n "sk-" -- .env.example</code>。如果能看到一串真实的 Key，说明你也在犯同样的错——立刻按上面第五节处理。
+  </div>
+
+  <h2>七、自测（凭记忆答）</h2>
+
+  <div class="quiz" data-answer="a">
+    <p class="q">1. 为什么 <code>embed()</code> 必须在内部把文本分批？</p>
+    <button class="quiz-option" data-key="a">接口单次能接收的条数有上限</button>
+    <button class="quiz-option" data-key="b">分批能让向量维度变得越小</button>
+    <button class="quiz-option" data-key="c">分批能让相似度计算更加准确</button>
+    <button class="quiz-option" data-key="d">分批是为了节省本地内存的占用</button>
+    <p class="feedback"
+       data-correct="对。这是硬限制：text-embedding-v4 单次最多 10 条，不分批直接报错。"
+       data-wrong="再想想：这是接口的硬性上限，不是性能优化。"></p>
+  </div>
+
+  <div class="quiz" data-answer="a">
+    <p class="q">2. 分批之后最容易出、而且不会报错的问题是什么？</p>
+    <button class="quiz-option" data-key="a">返回向量的顺序与输入发生了错位</button>
+    <button class="quiz-option" data-key="b">向量维度与配置里的数值不再一致</button>
+    <button class="quiz-option" data-key="c">接口的调用次数比预期的要更多</button>
+    <button class="quiz-option" data-key="d">返回的相似度分数整体变得偏低</button>
+    <p class="feedback"
+       data-correct="对。顺序错了不会抛异常，只会让检索结果整体偏移，而且极难发现。"
+       data-wrong="再想想：长度和维度都正常，唯独"第 i 个向量对应哪条文本"错了。"></p>
+  </div>
+
+  <div class="quiz" data-answer="a">
+    <p class="q">3. 怎么验证"分批后的顺序没有乱"？</p>
+    <button class="quiz-option" data-key="a">把输入整体逆序再跑一遍做对比</button>
+    <button class="quiz-option" data-key="b">增加更多条文本以提高可信度</button>
+    <button class="quiz-option" data-key="c">打印每一批的耗时来判断先后</button>
+    <button class="quiz-option" data-key="d">把 batch_size 调大一些再观察</button>
+    <p class="feedback"
+       data-correct="对。变换输入、预测输出，再逐位比对——结果应正好是原来的逆序。"
+       data-wrong="再想想：要构造一个"如果顺序对了、输出必然如此"的输入。"></p>
+  </div>
+
+  <div class="quiz" data-answer="a">
+    <p class="q">4. 真实的 API Key 应该写在哪里？</p>
+    <button class="quiz-option" data-key="a">写在 .env 这个被忽略的文件</button>
+    <button class="quiz-option" data-key="b">写在 .env.example 这个模板里</button>
+    <button class="quiz-option" data-key="c">直接写进 config.py 的代码里</button>
+    <button class="quiz-option" data-key="d">写到 README.md 的说明文字里</button>
+    <p class="feedback"
+       data-correct="对。.env 被 .gitignore 忽略；.env.example 是模板，必须保持占位符。"
+       data-wrong="再想想：.env.example 是会被提交的模板文件，Key 一旦进去就可能泄露。"></p>
+  </div>
+
+  <h2>八、想深入时读这个</h2>
+  <p><strong>首选一手资源：</strong><a href="https://help.aliyun.com/zh/model-studio/embedding">阿里云百炼官方文档 · 向量化（Embedding）</a>——中文原生，用它核对"单次最多 10 条""维度可选值"这类硬事实。</p>
+  <p class="muted">完整资源见 <a href="../RESOURCES.md">RESOURCES.md</a>；术语随时查 <a href="../reference/python-concepts-glossary.html">概念术语表</a>。建议顺序：0002 → 0001 → 0003 → 0004 → 0005。</p>
+
+  <div class="foot">
+    不清楚就直接问，比如"为什么 <code>dimensions</code> 要显式传""重试为什么放在单批而不是整体"。我是你的老师，问多基础都可以。
+  </div>
+
+</div>
+<script src="../assets/quiz.js"></script>
+</body>
+</html>

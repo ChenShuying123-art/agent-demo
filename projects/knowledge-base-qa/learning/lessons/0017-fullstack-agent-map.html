@@ -1,0 +1,272 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>课程 0017 · 从零到全栈：这个 RAG 项目是怎么搭起来的（收束 T0–T11）</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+<div class="wrap">
+
+  <p class="eyebrow">课程 0017 · 项目收束 · 覆盖 T0–T11</p>
+  <h1>从零到全栈：一张地图</h1>
+  <p class="lede">前面 16 课，你已经把每个零件单独写过一遍了。这一课不再讲新语法，而是把它们<strong>拼成一张地图</strong>：一次提问从浏览器出发、绕一圈回到你眼前，中间经过了谁、每层只负责什么、以及<strong>"全栈 + Agent 开发"到底在做什么</strong>。</p>
+
+  <div class="win">
+    <strong>学完你能做到：</strong>对着这张地图说清每个文件的职责与数据流向；解释"为什么必须先写底层再写接口"；把那几条贯穿全程的工程原则（薄层、依赖注入、统一错误、可观测、控制变量）套用到下一个项目上。
+    <br><span class="muted">配套：<a href="../reference/python-concepts-glossary.html">术语表</a> · <a href="../reference/fastapi-usage.html">FastAPI 用法手册</a> · 前置 <a href="0014-how-to-write-t10.html">课程 0014</a> / <a href="0016-app-assembly.html">课程 0016</a></span>
+  </div>
+
+  <h2>一、全景图：一次提问的完整旅程</h2>
+  <p>先建立整体图景。你在页面上敲一个问题、点"提问"，到答案出现，中间发生的事是这样的：</p>
+  <div class="diagram">
+    <div class="dbox"><strong>浏览器（Vue）</strong><span>AskPanel 发事件 → App 调 api.ts</span></div>
+    <div class="darrow">↓ fetch POST /api/qa {question, style, use_rerank}</div>
+    <div class="dbox"><strong>api/routes.py 的路由函数</strong><span>校验请求体 → 取出 pipeline → 委托</span></div>
+    <div class="darrow">↓ pipeline.answer(question, style, doc_ids, use_rerank)</div>
+    <div class="dbox"><strong>pipeline.retrieve()</strong><span>召回 20 → 重排 4</span></div>
+    <div class="drow">
+      <div class="dbox"><strong>embeddings</strong><span>问题 → 向量</span></div>
+      <div class="dbox"><strong>vectorstore</strong><span>cosine 取 Top-20</span></div>
+      <div class="dbox"><strong>rerank</strong><span>精排取 Top-4</span></div>
+    </div>
+    <div class="darrow">↓ pipeline._generate()：prompts 组装 messages</div>
+    <div class="dbox"><strong>llm（百炼 qwen-plus）</strong><span>生成答案</span></div>
+    <div class="darrow">↓ 抽取 [n] 引用 → 装配 QAResult</div>
+    <div class="dbox lead"><strong>schemas 转成 JSON → 回到浏览器</strong><span>AnswerCard 渲染答案 + 引用 + 召回→重排面板</span></div>
+    <div class="dcap">图 1 · 一次问答的完整链路（索引链路同理：loaders → chunking → embeddings → vectorstore）</div>
+  </div>
+  <p>把这条链路摊平成 spec §10 的九步：</p>
+  <table>
+    <thead><tr><th>阶段</th><th>步</th><th>谁来做</th><th>观测点（你能看到什么）</th></tr></thead>
+    <tbody>
+      <tr><td rowspan="4">索引</td><td>1 解析</td><td>loaders</td><td>原文长度、编码</td></tr>
+      <tr><td>2 切分</td><td>chunking</td><td>chunk 数、每段文本、start/end</td></tr>
+      <tr><td>3 向量化</td><td>embeddings</td><td>维度、范数、分批次数</td></tr>
+      <tr><td>4 入库</td><td>vectorstore</td><td>stats()：chunks / docs / dim</td></tr>
+      <tr><td rowspan="5">问答</td><td>5 问题向量化</td><td>embeddings</td><td>与索引是否同模型</td></tr>
+      <tr><td>6 <strong>召回</strong></td><td>vectorstore</td><td>Top-20 的分数分布</td></tr>
+      <tr><td>7 <strong>重排</strong></td><td>rerank</td><td>排名变化、rerank 分数</td></tr>
+      <tr><td>8 组装提示词</td><td>prompts</td><td><strong>发给模型的 messages 全文</strong></td></tr>
+      <tr><td>9 生成</td><td>llm</td><td>是否引用、是否拒答、耗时</td></tr>
+    </tbody>
+  </table>
+  <p class="muted">左侧一列是"阶段"，中间是"谁做"，右边是"怎么看见"。<strong>整份 spec 与整个项目，本质上就是在回答这三列。</strong></p>
+
+  <h2>二、三层架构：每一层只做一件事</h2>
+  <p>项目目录看着多，其实只有三层，边界很清楚：</p>
+  <table>
+    <thead><tr><th>层</th><th>目录</th><th>职责</th><th>它认识谁</th></tr></thead>
+    <tbody>
+      <tr><td>能力库</td><td><code>kbqa/</code></td><td>加载 / 切分 / 向量 / 检索 / 重排 / 生成 / 编排 / 评测</td><td><strong>不认识 Web</strong>（Notebook 里也能跑）</td></tr>
+      <tr><td>接口层</td><td><code>api/</code></td><td>把能力接上 HTTP：解析、委托、翻译</td><td>认识 HTTP 与 <code>kbqa</code></td></tr>
+      <tr><td>前端</td><td><code>web/</code></td><td>可视化与交互，把两阶段检索画出来</td><td>只认识 <code>/api/*</code></td></tr>
+    </tbody>
+  </table>
+  <div class="note">
+    <span class="label">一个判断标准（很实用）</span>
+    <strong>把 FastAPI 整个删掉，<code>kbqa/</code> 里的东西应该还是完整的；把 Vue 删掉，<code>api/</code> 也照样能用 curl 调。</strong>
+    任何一层被删掉就活不下去，说明层没分开。本项目三层都是能独立跑的——这就是"薄层"的落地。
+  </div>
+  <p>为什么值得这样分？因为<strong>三层的"变化速度"不一样</strong>：</p>
+  <ul>
+    <li>换模型（qwen-plus → 别的）：只动 <code>kbqa/llm.py</code> + <code>.env</code>；</li>
+    <li>换框架（FastAPI → 别的 Web 框架）：只动 <code>api/</code>；</li>
+    <li>换界面（换个前端）：只动 <code>web/</code>。</li>
+  </ul>
+  <p class="muted">分开的理由不是"好看"，而是<strong>把变化关在一个盒子里</strong>。</p>
+
+  <h2>三、为什么是这个开发顺序</h2>
+  <p>15 个任务的依赖图（spec §2）看着像流程，其实是一条<strong>很有讲究的施工顺序</strong>：</p>
+  <div class="diagram">
+    <div class="dbox"><strong>T0 骨架</strong><span>配置 / 模型 / 日志</span></div>
+    <div class="darrow">↓ 先把"地基"写稳，后面所有模块都要 import 它</div>
+    <div class="drow">
+      <div class="dbox"><strong>T1–T4 索引链路</strong><span>加载→切分→向量→存储</span></div>
+      <div class="dbox"><strong>T6–T7 生成侧</strong><span>LLM 调用→提示词</span></div>
+    </div>
+    <div class="darrow">↓ 底层能力各自可验证后，才开始"串起来"</div>
+    <div class="drow">
+      <div class="dbox"><strong>T5 重排</strong><span>精排</span></div>
+      <div class="dbox"><strong>T8 检索编排</strong><span>召回+重排</span></div>
+    </div>
+    <div class="darrow">↓ 编排层是"只做顺序与边界"的薄层</div>
+    <div class="dbox"><strong>T9 问答编排</strong><span>把检索 + 提示词 + 生成接起来</span></div>
+    <div class="darrow">↓ 核心链路跑通后，才往外包壳</div>
+    <div class="drow">
+      <div class="dbox"><strong>T10 API</strong><span>HTTP 薄层</span></div>
+      <div class="dbox"><strong>T11 前端</strong><span>可视化</span></div>
+    </div>
+    <div class="dcap">图 2 · 由内而外：地基 → 零件 → 编排 → 外壳</div>
+  </div>
+  <div class="note">
+    <span class="label">核心道理：先能单独验证，再谈集成</span>
+    越底层越不变、越上层越常变；<strong>底层错了，上层做得再漂亮也是错的</strong>（tasks.md 里叫"复利增长的排查成本"）。
+    所以每一层都有独立的验证手段：<strong>写 <code>embeddings.py</code> 时用 15 条带编号的文本验顺序，根本不需要前端；写前端时后端已经稳了，出错就只可能是前端。</strong>
+  </div>
+  <p>反例：如果先写前端、边写边补后端，你会陷入"页面不对到底是哪一层的问题"的泥潭——<strong>一次只能有一个变量在动</strong>（这条原则后面还会出现，就是"控制变量"）。</p>
+
+  <h2>四、每一层用什么工具验证</h2>
+  <table>
+    <thead><tr><th>层</th><th>验证工具</th><th>能测什么</th><th>不能测什么</th></tr></thead>
+    <tbody>
+      <tr><td>能力库</td><td>Notebook / <code>python -c</code></td><td>切分、向量、检索、重排、生成的全部数值</td><td>HTTP 行为</td></tr>
+      <tr><td>接口层</td><td><code>TestClient</code> / <code>curl</code> / <code>/docs</code></td><td>状态码、错误信封、字段形状（<strong>不必开前端</strong>）</td><td>页面长什么样</td></tr>
+      <tr><td>前端</td><td>浏览器（Vite dev / 单端口）</td><td>交互、布局、召回→重排面板是否直观</td><td>底层算法对不对</td></tr>
+    </tbody>
+  </table>
+  <p class="muted">一个实用习惯：<strong>接口层的错误路径几乎都能"离线"测</strong>（空问题、假 doc_id、漏字段），先跑绿这些，再花真金白银调模型。</p>
+
+  <h2>五、贯穿全程的七条工程原则（这是最该带走的）</h2>
+  <table>
+    <thead><tr><th>原则</th><th>本项目怎么做</th><th>一句话记忆</th></tr></thead>
+    <tbody>
+      <tr><td>配置外置 + fail fast</td><td>密钥/模型名/参数全在 <code>.env</code>；缺失就启动即报错</td><td>改配置不改代码，错了立刻炸</td></tr>
+      <tr><td>依赖注入 + 工厂 + 协议</td><td><code>RAGPipeline</code> 接住 store/embedder/reranker/llm；<code>get_*()</code> 决定用哪个实现</td><td>不自己 new，变化关进一个盒子</td></tr>
+      <tr><td>薄层 / 关注点分离</td><td>路由只做解析、委托、翻译；核心库不认识 HTTP</td><td>删掉框架，库里还完整</td></tr>
+      <tr><td>统一错误 + 透传上游</td><td>所有错误都是 <code>{error:{code,message}}</code>；502 带百炼原始 code</td><td>错误也有形状，排查一步到位</td></tr>
+      <tr><td>可观测性</td><td>主流程日志打点（§18.2）；召回/重排分阶段暴露；前端画"召回→重排"</td><td>中间产物要能看见，别靠猜</td></tr>
+      <tr><td>控制变量</td><td>三种风格共享同一份硬约束；<code>answer_all_styles</code> 只检索一次</td><td>一次只让一个东西变</td></tr>
+      <tr><td>不变量断言</td><td><code>npy 行数 == jsonl 行数</code>；<code>text[start:end] == chunk</code></td><td>把"必须永远成立"写成检查</td></tr>
+    </tbody>
+  </table>
+  <p class="muted">这七条不是 RAG 专属——它们是你做任何后端/全栈项目都能直接搬走的。</p>
+
+  <h2>六、Agent / RAG 特有的心智模型</h2>
+  <h3>1. 检索是"找到证据"，不是"搜索"</h3>
+  <p>普通搜索返回链接给人看；RAG 的检索是<strong>给模型递证据</strong>。所以评价标准不是"搜得准"，而是<strong>"证据够不够支撑答案"</strong>——召回宁多勿漏（20 条），让重排去挑（4 条）。</p>
+  <h3>2. 为什么要两阶段检索（召回 20 → 重排 4）</h3>
+  <table>
+    <thead><tr><th></th><th>召回（Bi-encoder）</th><th>重排（Cross-encoder）</th></tr></thead>
+    <tbody>
+      <tr><td>做法</td><td>问题与文档<strong>各自</strong>编码，比向量距离</td><td>问题与文档<strong>拼在一起</strong>过模型打分</td></tr>
+      <tr><td>速度</td><td>快（可预计算索引）</td><td>慢（每条都要现算）</td></tr>
+      <tr><td>精度</td><td>粗（区分度窄）</td><td>细（区分度宽）</td></tr>
+      <tr><td>角色</td><td><strong>广撒网</strong>，保证不漏</td><td><strong>精挑</strong>，把对的顶上来</td></tr>
+    </tbody>
+  </table>
+  <p class="muted">这就是"<strong>用便宜的方法筛掉 99%，用贵的方法精算 1%</strong>"这个通用套路在 RAG 里的样子。</p>
+  <h3>3. 提示词就是"接口契约"</h3>
+  <p>三种风格的差异只在风格段，硬约束是同一份字符串——这让"风格"成了唯一变量。硬约束里的四条（只依据资料、不足则拒答、必须标引用、不许编造）直接决定模型行为，所以它们<strong>被冻结在 spec §12.3，代码逐字照抄</strong>。</p>
+  <h3>4. 幻觉与拒答是一等公民</h3>
+  <p>RAG 最容易翻车的不是"答不出"，而是<strong>"答得太顺"</strong>——用常识编一段。所以：越界引用只告警不崩溃、资料外问题必须拒答、追问要承认"资料未覆盖"。</p>
+  <h3>5. 没有评测，就没有 RAG 工程</h3>
+  <p>改切分、换模型、开关重排，凭感觉都是"好像好一点"。所以要：<strong>自己出题 → 固定变量 → LLM 当裁判 → 出对比表</strong>。评测集必须你自己出（T12 之所以标 👤，就是因为"出题人已知答案，才能判断裁判打分是否靠谱"）。</p>
+
+  <h2>七、前端这一层（全栈的另一半）</h2>
+  <p>前端只有两种运行形态，记住这张图就不会踩坑：</p>
+  <div class="diagram">
+    <div class="drow">
+      <div class="dbox"><strong>开发模式</strong><span>Vite :5173 ——proxy /api→:8000—— FastAPI :8000</span></div>
+      <div class="dbox lead"><strong>生产模式</strong><span>FastAPI :8000 同时发页面与 /api（同源）</span></div>
+    </div>
+    <div class="dcap">图 3 · 开发要"热更新"，生产要"一个端口"——所以有了两种形态</div>
+  </div>
+  <p>四条前端侧的通用做法：</p>
+  <ul>
+    <li><strong>网络调用收在一个文件</strong>（<code>api.ts</code>）：组件里不散写 fetch，错误信封也只解包一次；</li>
+    <li><strong>组件只发事件、不干活</strong>：App 当"薄控制器"统一管 loading/错误/刷新，组件是展示型；</li>
+    <li><strong>契约跟着后端走</strong>：<code>api.ts</code> 里的类型与 <code>schemas.py</code> 一一对应，改字段两边同步；</li>
+    <li><strong>把"最有学习价值的东西"做成一等公民</strong>：本项目是「召回 → 重排」面板——如果 UI 不展示它，两阶段检索就白做了。</li>
+  </ul>
+
+  <h2>八、任务 → 你学到的东西（课程索引）</h2>
+  <table>
+    <thead><tr><th>任务</th><th>核心概念</th><th>课程</th></tr></thead>
+    <tbody>
+      <tr><td>T0 骨架</td><td>包结构、配置外置、日志、dataclass、模块级单例</td><td><a href="0001-how-to-write-t0.html">0001</a> / <a href="0002-reading-t0-code.html">0002</a></td></tr>
+      <tr><td>T1 加载</td><td>内容寻址去重、外部输入不可信、路径穿越</td><td><a href="0003-how-to-write-t1.html">0003</a></td></tr>
+      <tr><td>T2 切分</td><td>不变量断言（start/end）、overlap 的意义</td><td><a href="0004-how-to-write-t2.html">0004</a></td></tr>
+      <tr><td>T3 向量化</td><td>分批上限、<strong>顺序一致性</strong>、维度</td><td><a href="0005-how-to-write-t3.html">0005</a></td></tr>
+      <tr><td>T4 向量存储</td><td>L2 归一化、argpartition、行序同步、幂等</td><td><a href="0006-how-to-write-t4.html">0006</a></td></tr>
+      <tr><td>T5 Rerank</td><td>Cross-encoder、endpoint 不同、降级策略</td><td><a href="0007-how-to-write-t5.html">0007</a></td></tr>
+      <tr><td>T6 LLM 调用</td><td>适配器、思考模式、错误码</td><td><a href="0008-how-to-write-t6.html">0008</a> / <a href="0009-protocol-factory-adapter.html">0009</a></td></tr>
+      <tr><td>T7 提示词</td><td>单一事实来源、逐字照抄、控制变量</td><td><a href="0010-how-to-write-t7.html">0010</a></td></tr>
+      <tr><td>T8 检索编排</td><td>编排层要薄、分阶段暴露</td><td><a href="0011-how-to-write-t8.html">0011</a></td></tr>
+      <tr><td>T9 问答编排</td><td>只检索一次、引用反查、越界引用</td><td><a href="0012-how-to-write-t9.html">0012</a></td></tr>
+      <tr><td>（补课）依赖注入</td><td>控制反转、自己不 new</td><td><a href="0013-dependency-injection.html">0013</a></td></tr>
+      <tr><td>T10 API</td><td>路由、schema 分离、错误信封、app.state</td><td><a href="0014-how-to-write-t10.html">0014</a> / <a href="0015-exception-handler.html">0015</a> / <a href="0016-app-assembly.html">0016</a></td></tr>
+      <tr><td>T11 前端</td><td>dev/prod、proxy、薄控制器、召回→重排面板</td><td>（本课）</td></tr>
+    </tbody>
+  </table>
+
+  <h2>九、如果让你从零做一个类似项目，步骤是</h2>
+  <ol>
+    <li><strong>先画三层与数据流</strong>：能力库 / 接口层 / 前端，各写一句职责。边界不清就别动手。</li>
+    <li><strong>列依赖顺序，从"最底层且最不变"的开始写</strong>：配置 → 数据结构 → 各能力 → 编排 → 接口 → 前端。</li>
+    <li><strong>每写一个模块，配一条验证命令</strong>（Notebook 数值 / TestClient 状态码 / 浏览器交互）。<strong>验证不通过不往下走。</strong></li>
+    <li><strong>把外部依赖都收进适配器 + 工厂</strong>：模型、网络、文件系统都一样——换实现只改一处。</li>
+    <li><strong>核心链路先用脚本跑通</strong>（Notebook/CLI），确定"能出正确答案"了，再包 HTTP。</li>
+    <li><strong>接口层只写三件事</strong>：解析请求、委托 pipeline、翻译响应；错误统一信封 + 透传上游 code。</li>
+    <li><strong>前端把"最有价值的过程"可视化</strong>，而不是只显示最终结果。</li>
+    <li><strong>最后做评测</strong>：自己出题 → 固定变量 → 出对比表 → 按"切分/召回/重排/提示词"归因。</li>
+  </ol>
+  <p class="muted">把 <code>data/</code>、<code>.env</code>、<code>learning/</code>、<code>samples/</code> 这类"运行时数据 / 私人材料"提前写进 <code>.gitignore</code>，也是第 1 步就该做的事。</p>
+
+  <h2>十、自测（凭记忆答）</h2>
+
+  <div class="quiz" data-answer="b">
+    <p class="q">1. 判断"三层分得对不对"，下面哪个标准最靠谱？</p>
+    <button class="quiz-option" data-key="a">代码行数是不是足够少</button>
+    <button class="quiz-option" data-key="b">删掉某一层，其它层是否还能独立运行</button>
+    <button class="quiz-option" data-key="c">目录层级是不是不超过三层</button>
+    <button class="quiz-option" data-key="d">每层是不是都用了设计模式</button>
+    <p class="feedback"
+       data-correct="对。删掉 FastAPI，kbqa 还完整；删掉 Vue，api 还能 curl——这才叫分层。"
+       data-wrong="再想想：分层看的是"能不能独立活"，不是行数或层数。"></p>
+  </div>
+
+  <div class="quiz" data-answer="c">
+    <p class="q">2. 为什么开发顺序是"先底层能力、后编排、最后接口与前端"？</p>
+    <button class="quiz-option" data-key="a">因为上层代码比下层代码更难写</button>
+    <button class="quiz-option" data-key="b">因为 Python 规定必须先定义被调用的模块</button>
+    <button class="quiz-option" data-key="c">因为底层错了上层全白做，且每层要能单独验证</button>
+    <button class="quiz-option" data-key="d">因为这样做出来的代码运行速度更快</button>
+    <p class="feedback"
+       data-correct="对。一次只让一个变量在动，出错时立刻能定位到哪一层。"
+       data-wrong="再想想：这是"排查成本复利增长"的问题——底层不稳，上层无从验证。"></p>
+  </div>
+
+  <div class="quiz" data-answer="a">
+    <p class="q">3. 两阶段检索里，"召回 20 → 重排 4"的分工是？</p>
+    <button class="quiz-option" data-key="a">召回用便宜的方法广撒网保证不漏，重排用贵的方法精挑</button>
+    <button class="quiz-option" data-key="b">召回负责精度，重排负责速度</button>
+    <button class="quiz-option" data-key="c">两者算法完全一样，只是召回多了 16 条</button>
+    <button class="quiz-option" data-key="d">召回给模型看，重排给用户看</button>
+    <p class="feedback"
+       data-correct="对。Bi-encoder 快而粗、Cross-encoder 慢而准，先用便宜的筛掉 99%。"
+       data-wrong="再想想：召回是双塔（可预计算、快、区分度窄），重排是交叉编码器（现算、准）。"></p>
+  </div>
+
+  <div class="quiz" data-answer="d">
+    <p class="q">4. 为什么评测集必须由"出题人自己"来写（T12 标 👤）？</p>
+    <button class="quiz-option" data-key="a">因为 AI 写出来的题目文件格式一定是错的</button>
+    <button class="quiz-option" data-key="b">因为出题会消耗大量模型额度，需要人来控制成本</button>
+    <button class="quiz-option" data-key="c">因为题目里必须包含只有 AI 才知道的机密信息</button>
+    <button class="quiz-option" data-key="d">因为只有已知答案的人，才能判断裁判打分靠不靠谱</button>
+    <p class="feedback"
+       data-correct="对。裁判本身也是模型，出题人得先知道正确答案，才看得出裁判有没有判错。"
+       data-wrong="再想想：这一环是"校准裁判"——你不知道答案，就没法验证打分是否可信。"></p>
+  </div>
+
+  <h2>十一、还没做完的事（接下来）</h2>
+  <table>
+    <thead><tr><th>任务</th><th>内容</th><th>为什么要做</th></tr></thead>
+    <tbody>
+      <tr><td>T12 👤</td><td>自己出评测集（12–20 条，四类题型）</td><td>没有基准，后面所有优化都无法证明有效</td></tr>
+      <tr><td>T13 🤖</td><td>评测与消融（提示词对比 + Rerank 开关）</td><td>用数据回答"重排到底有没有用"</td></tr>
+      <tr><td>T14 🤖+👤</td><td>README 复盘，讲清全链路与实测收益</td><td>能对外讲明白，才算真的掌握</td></tr>
+    </tbody>
+  </table>
+  <p><strong>再往后（Agent 化路线，spec §16）</strong>：混合检索 → Query Rewrite → 语义分块 → 对话记忆 → <strong>把"检索"变成 LLM 可调用的工具，让它自己决定何时检索、检索几次</strong>。注意：<strong>只有把现在这条"固定链路"完全跑通、并且有评测数据，才谈得上去做 Agent——否则你连"它变差了"都发现不了。</strong></p>
+
+  <div class="foot">
+    全栈不难，难的是"知道每一层为什么存在"。这张地图如果你能自己讲一遍，就说明你掌握了。<br>
+    想继续，就从 <a href="../reference/python-concepts-glossary.html">术语表</a> 查漏，或直接开始 T12 出题——出题的过程会逼你把每份文档读细。
+  </div>
+
+</div>
+<script src="../assets/quiz.js"></script>
+</body>
+</html>

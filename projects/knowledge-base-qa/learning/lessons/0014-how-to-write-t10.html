@@ -1,0 +1,298 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>课程 0014 · 把 RAG 接上网：HTTP 接口层（拆解 T10）</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+<div class="wrap">
+
+  <p class="eyebrow">课程 0014 · RAG 项目实战 · 对应任务 T10</p>
+  <h1>把 RAG 接上网</h1>
+  <p class="lede">前 9 个任务里，RAG 只能在 Notebook 里被"你自己"调用。T10 给它套上 HTTP 接口，从此浏览器、Vue 前端、任何程序都能调它。这一课最值钱的一句话是——<strong>接口层要薄：它只会做三件事，解析、委托、翻译。</strong></p>
+
+  <div class="win">
+    <strong>学完你能做到：</strong>说清"一句 HTTP 请求是怎么走到 <code>RAGPipeline</code> 的"；看懂为什么接口要单独定义一套"请求/响应模型"而不是直接吐内部对象；知道错误为什么要包成统一形状；以及为什么"Web 版的依赖注入"是把对象挂在 <code>app.state</code> 上。
+    <br><span class="muted">配套：<a href="../reference/fastapi-usage.html">FastAPI 用法手册</a> · <a href="../reference/python-concepts-glossary.html">术语表</a> · 前置 <a href="0012-how-to-write-t9.html">课程 0012</a> / <a href="0013-dependency-injection.html">课程 0013</a></span>
+  </div>
+
+  <h2>一、这一层到底在干嘛：一条链路的全程</h2>
+  <p>先建立整体图景，再抠细节。一个请求从进到出，只经过四段：</p>
+  <div class="diagram">
+    <div class="dbox"><strong>浏览器 / Vue / curl</strong><span>发一句 POST /api/qa</span></div>
+    <div class="darrow">↓ HTTP</div>
+    <div class="dbox"><strong>api/routes.py 的路由函数</strong><span>解析请求 → 转成参数</span></div>
+    <div class="darrow">↓ 调用（不做算法）</div>
+    <div class="dbox"><strong>RAGPipeline</strong><span>召回 → 重排 → 生成（前 9 个任务写的）</span></div>
+    <div class="darrow">↓ 返回 QAResult</div>
+    <div class="dbox lead"><strong>响应模型 → JSON</strong><span>翻译成前端能读的形状</span></div>
+    <div class="dcap">图 1 · 接口层是"翻译官"，不是"干活的人"</div>
+  </div>
+  <p>把路由函数想象成公司前台：它<strong>不生产任何东西</strong>，只负责<strong>把你领到正确的部门</strong>（委托），再<strong>把你的话翻译成对方能懂的话</strong>（翻译）。真正干活的是 <code>RAGPipeline</code>。</p>
+
+  <div class="note">
+    <span class="label">薄接口层</span>
+    路由里<strong>不该出现</strong>检索、拼提示词、算余弦相似度这类代码。一旦写进去：
+    ① Notebook 和 API 会各持一份逻辑，迟早不一致；② 换框架（比如从 FastAPI 换成别的）时所有业务要重写。
+    <strong>判断标准：把 FastAPI 整个删掉，<code>kbqa/</code> 里的东西应该还是完整的。</strong>T10 正是按这个标准做的——只新增 <code>api/</code>，没动 <code>kbqa/</code> 一行。
+  </div>
+
+  <h2>二、路由：把函数"挂"到一个 URL 上</h2>
+  <p>所谓"接口"，在 FastAPI 里就是一个<strong>贴了装饰器的普通函数</strong>：</p>
+  <pre><code>router = APIRouter(prefix="/api", tags=["kbqa"])
+
+@router.get("/health", response_model=HealthResponse)   # ← 贴上去，就"挂"在了 GET /api/health
+def health(request: Request) -&gt; HealthResponse:
+    ...</code></pre>
+  <p>装饰器 <code>@router.get(...)</code> 做的事，和 <code>@dataclass</code> 一样——<strong>替你加工</strong>：它把 <code>health</code> 这个函数登记进一张"URL → 函数"的对照表。请求进来时，框架查表、找到函数、调用它、再把返回值变成 JSON。</p>
+
+  <table>
+    <thead><tr><th>HTTP 方法</th><th>语义</th><th>本项目用在哪</th></tr></thead>
+    <tbody>
+      <tr><td><code>GET</code></td><td>读取，不改变数据</td><td>查健康状态、列文档</td></tr>
+      <tr><td><code>POST</code></td><td>提交数据、触发一次动作</td><td>上传、索引、检索、问答</td></tr>
+      <tr><td><code>DELETE</code></td><td>删除</td><td>删文档及其向量</td></tr>
+    </tbody>
+  </table>
+  <p class="muted">三行 <code>/api/documents</code> 里藏着两种方法：<code>POST</code> 是"传一个文件上来"，<code>GET</code> 是"把列表给我"。同一个 URL、不同方法 = 不同动作，这是 HTTP 的约定。</p>
+
+  <h3>状态码：用数字说"结果如何"</h3>
+  <p>函数要么正常返回，要么抛异常。但 HTTP 需要一个<strong>数字</strong>告诉调用方"刚才发生了什么"。本项目用到的几个：</p>
+  <table>
+    <thead><tr><th>码</th><th>含义</th><th>本项目什么时候出现</th></tr></thead>
+    <tbody>
+      <tr><td><code>200</code></td><td>成功</td><td>一切正常</td></tr>
+      <tr><td><code>400</code></td><td>你给的数据有问题</td><td>doc_id 不存在、风格拼错</td></tr>
+      <tr><td><code>404</code></td><td>找不到</td><td>删除一个不存在的文档</td></tr>
+      <tr><td><code>422</code></td><td>请求体格式不合规</td><td>漏传 <code>question</code> 字段</td></tr>
+      <tr><td><code>502</code></td><td>不是我的错，是上游挂了</td><td>百炼返回 key 无效 / 额度不足</td></tr>
+    </tbody>
+  </table>
+  <div class="note">
+    <span class="label">400 与 502 的区别</span>
+    400 是"<strong>你的错</strong>"（改一下请求就能成功）；502 是"<strong>背后服务的错</strong>"（我们的代码没问题，是百炼那边拒绝了）。
+    分清楚这个，排查时才知道该改前端传参、还是去查 API Key。
+  </div>
+
+  <h2>三、两套"模型"：为什么接口不直接吐内部对象</h2>
+  <p>项目里其实有<strong>两套</strong>数据结构描述同一件事：</p>
+  <pre><code>kbqa/models.py        @dataclass Document   # 内部契约（给 Python 代码看）
+api/schemas.py        class DocumentOut      # 对外契约（给网络/前端看）</code></pre>
+  <p>看起来是"重复定义"，但它们是<strong>故意分开</strong>的。用两个真实差异来看为什么：</p>
+  <table>
+    <thead><tr><th>字段</th><th>内部的 Document</th><th>对外的 DocumentOut</th><th>为什么不一样</th></tr></thead>
+    <tbody>
+      <tr><td>路径</td><td><code>path: Path</code></td><td><code>path: str</code></td><td>JSON 没有"路径对象"这种类型，得转成字符串</td></tr>
+      <tr><td>耗时</td><td>pipeline 返回 <code>elapsed_ms</code></td><td>接口返回 <code>ms</code></td><td>§8 表格规定对外字段名是 <code>ms</code>，映射在接口层完成</td></tr>
+    </tbody>
+  </table>
+  <p>于是接口层多了一排"翻译函数"，名字都以 <code>to_</code> 开头：</p>
+  <pre><code>def to_search_out(item: SearchResult) -&gt; SearchResultOut:
+    return SearchResultOut(chunk=to_chunk_out(item.chunk), score=item.score, rank=item.rank)</code></pre>
+  <p class="muted">它们像"出口报关"：内部的字段名/类型可以自由演进，<strong>只要报关单（schema）不变，前端就不受影响</strong>。反过来，API 若要改字段名，改动也只集中在这一个文件里。</p>
+
+  <div class="note">
+    <span class="label">顺带白拿的好处：请求校验</span>
+    请求模型 <code>class QARequest(BaseModel): question: str ...</code> 会自动校验：漏传 <code>question</code> → 框架直接返回 422，<strong>函数体根本不会被执行</strong>。
+    再加上 FastAPI 会读这些模型<strong>自动生成 <code>/docs</code> 页面</strong>——你写的类型注解，变成了可点的接口文档。
+  </div>
+
+  <h2>四、错误也要有"形状"：统一信封</h2>
+  <p>如果每个接口出错时各返回各的样子（有的是字符串、有的是 <code>{"detail": ...}</code>），前端就得写一堆 if。§8 定的规矩是<strong>所有错误一个形状</strong>：</p>
+  <pre><code>{ "error": { "code": "invalid_request", "message": "文档不存在：deadbeef" } }</code></pre>
+  <p>实现上，路由只管<strong>抛异常</strong>，由<code>install_exception_handlers</code>集中翻译成这个形状：</p>
+  <table>
+    <thead><tr><th>抛出的异常</th><th>翻译成</th><th>code</th></tr></thead>
+    <tbody>
+      <tr><td><code>ValueError</code>（用户输入非法）</td><td>400</td><td><code>invalid_request</code></td></tr>
+      <tr><td><code>ApiError(404, ...)</code></td><td>404</td><td><code>document_not_found</code></td></tr>
+      <tr><td><code>RequestValidationError</code></td><td>422</td><td><code>validation_error</code></td></tr>
+      <tr><td><code>LLMError</code> / <code>OpenAIError</code></td><td>502</td><td><strong>透传百炼的 code</strong>（如 <code>invalid_api_key</code>）</td></tr>
+      <tr><td>其他任何异常</td><td>500</td><td><code>internal_error</code></td></tr>
+    </tbody>
+  </table>
+  <div class="note">
+    <span class="label">为什么 502 要"透传"百炼的 code</span>
+    上游失败的原因五花八门：Key 写错、没开通模型、账号欠费、地域不对……如果一律回一句"服务异常"，前端只能干瞪眼。
+    <strong>把原始 code 原样带出来</strong>（<code>invalid_api_key</code> / <code>Model.AccessDenied</code>），排查时一眼就找到方向。
+    这就是课程 0008 把 SDK 异常包装成带 <code>.code</code> 的 <code>LLMError</code> 的用处——<strong>接口层接住的就是这个 <code>.code</code></strong>。
+  </div>
+
+  <h2>五、Web 版的"依赖注入"：为什么挂在 app.state</h2>
+  <p>课程 0013 讲过：<code>RAGPipeline</code> 不自己 new 组件，而是从构造函数接住 store / embedder / reranker / llm。那<strong>谁来造 pipeline、造完放哪</strong>？答案在 <code>create_app()</code>：</p>
+  <pre><code>def create_app() -&gt; FastAPI:
+    store = VectorStore.load(settings.data_dir / "index")     # 1. 造一次
+    pipeline = RAGPipeline(settings, store, ...)              # 2. 组装
+    app = FastAPI(...)
+    app.state.store = store                                   # 3. 挂到 app 身上
+    app.state.pipeline = pipeline
+    ...
+    return app</code></pre>
+  <p>路由需要时再取出来用：</p>
+  <pre><code>def _pipeline(request: Request) -&gt; RAGPipeline:
+    return request.app.state.pipeline</code></pre>
+  <div class="diagram">
+    <div class="dbox"><strong>create_app()</strong><span>只在启动时跑一次</span></div>
+    <div class="darrow">↓ 造出唯一的一份</div>
+    <div class="dbox"><strong>app.state</strong><span>pipeline + store（应用级单例）</span></div>
+    <div class="darrow">↓ 每个请求通过 request.app.state 取用</div>
+    <div class="drow">
+      <div class="dbox"><strong>路由 A</strong><span>/api/qa</span></div>
+      <div class="dbox"><strong>路由 B</strong><span>/api/retrieve</span></div>
+      <div class="dbox"><strong>路由 C</strong><span>/api/index</span></div>
+    </div>
+    <div class="dcap">图 2 · 建一次、处处用——这就是"依赖注入"在 Web 里的落地</div>
+  </div>
+  <p>为什么不用模块级全局变量（像 <code>settings</code> 那样）？因为 pipeline / store 是<strong>有状态</strong>的对象：</p>
+  <ul>
+    <li>挂在 <code>app.state</code> 上，测试时可以建一个"带替身的 app"，多个测试之间互不污染；</li>
+    <li><code>pipeline</code> 和 <code>store</code> <strong>必须共用同一个 store 实例</strong>——否则会出现"<code>/api/index</code> 往内存索引里写了，<code>/api/documents/{id}</code> 删除时却看不到它"的不一致。</li>
+  </ul>
+
+  <h2>六、两个真实的坑（都写进代码注释了）</h2>
+  <h3>坑 1：静态托管要放在路由注册之后</h3>
+  <pre><code>app.include_router(router)                     # 先注册 /api/* 路由
+if _WEB_DIST.is_dir():
+    app.mount("/", StaticFiles(...))           # 再把 "/" 兜底给前端页面</code></pre>
+  <p><code>mount("/")</code> 会<strong>抢走所有没被前面匹配的路径</strong>。如果先挂它，<code>/api/health</code> 就会被当成"前端静态目录里叫 api 的文件夹"去找，直接 404。</p>
+  <h3>坑 2：写在"上游还没做"的时候</h3>
+  <p>T10 做的时候，T11（Vue 前端）还没开工，<code>web/dist</code> 根本不存在。所以挂载前必须<strong>先判断目录在不在</strong>：</p>
+  <pre><code>if _WEB_DIST.is_dir():   # ← 不加这句，T10 阶段启动就报错
+    app.mount("/", ...)</code></pre>
+  <p class="muted">这是"按顺序做任务"带来的常见处境：<strong>为未来留好接口，但不能依赖未来已经存在。</strong></p>
+
+  <h2>七、实测数据</h2>
+  <p>启动：<code>python -m uvicorn api.main:app --port 8010</code> → <code>Application startup complete</code>，无报错。</p>
+  <table>
+    <thead><tr><th>验收点</th><th>实测</th></tr></thead>
+    <tbody>
+      <tr><td><code>/docs</code> 可见路由数</td><td>✅ <strong>8 个</strong>（见下方说明）</td></tr>
+      <tr><td><code>/api/health</code> 返回三个模型名</td><td>✅ <code>{"status":"ok","chat_model":"qwen-plus","embedding_model":"text-embedding-v4","rerank_model":"qwen3-rerank"}</code></td></tr>
+      <tr><td>端到端：上传 → 索引 → 问答</td><td>✅ 上传 <code>tasks.md</code>（命中去重）→ 索引 40 chunk / 4 批 / 2096ms → 问答返回 194 字、3 条引用、latency 4232ms</td></tr>
+      <tr><td><code>/api/retrieve</code> 返回三字段</td><td>✅ <code>candidates=20, used=4, degraded=false</code></td></tr>
+      <tr><td>不存在的 doc_id → 结构化错误</td><td>✅ <code>400 {"error":{"code":"invalid_request", ...}}</code>；DELETE 返回 <code>404 document_not_found</code></td></tr>
+      <tr><td>漏字段 / 风格非法</td><td>✅ <code>422 validation_error</code> / <code>400 invalid_request</code>，同一信封</td></tr>
+    </tbody>
+  </table>
+  <div class="note">
+    <span class="label">关于"8 个而不是 9 个"</span>
+    tasks.md 的 T10 写"9 个路由"，但 spec §8 的表其实有 10 条，其中 <code>/api/eval/prompt</code>、<code>/api/eval/ablation</code> 依赖 T13 才写的 <code>kbqa/evaluate.py</code>。
+    本轮只做了<strong>其余 8 条</strong>，评测两条留到 T13 完成后补挂。
+    <strong>教训：文档里的数字和表格对不上时，以表格（契约）为准，并把差异记下来</strong>——不要为了凑数去写还没法实现的接口。
+  </div>
+  <div class="note">
+    <span class="label">接口层顺带发现的一个上游缺口</span>
+    <code>GET /api/documents</code> 返回的 <code>indexed</code> 恒为 <code>false</code>、<code>chunk_count</code> 恒为 <code>0</code>。
+    原因不在接口层，而是 T1 的 <code>loaders.list_documents()</code> 还没去读 T4 建好的 <code>data/index/docs.json</code>（NOTES 里已记为待办）。
+    <strong>接口层的一个好处：它把这类"上游没拼齐"的问题暴露得很清楚</strong>——因为前端最需要的就是这些状态。
+  </div>
+
+  <h2>八、如果从零写这个任务，我的步骤是</h2>
+  <ol>
+    <li><strong>先把 §8 那张表抄成函数骨架</strong>：一行 = 一个「方法 + 路径 + 请求 + 响应」，先把名字和返回类型写出来，函数体留 <code>...</code>。有了骨架，后面只是填空。</li>
+    <li><strong>写 schemas.py（请求/响应模型）</strong>：请求模型负责校验，响应模型负责形状；再写一组 <code>to_xxx_out()</code> 转换函数。<em>先定契约，再写逻辑。</em></li>
+    <li><strong>写 routes.py 的 8 个函数体</strong>：每个都短得可怜——取依赖、调 pipeline、转成响应模型。<strong>凡是超过 10 行的路由，八成是把业务写进来了。</strong></li>
+    <li><strong>写 create_app() 装配</strong>：造 store/pipeline → 挂 <code>app.state</code> → 注册异常处理 → 注册路由 →（可选）挂静态目录。</li>
+    <li><strong>最后补统一错误处理</strong>：把所有"内部异常"翻译成错误信封。</li>
+    <li><strong>按"先离线、后联网"自测</strong>：① <code>import</code> 能否通过 → ② <code>/docs</code> 能不能开 → ③ <code>/health</code> → ④ 各种错误路径（不烧钱）→ ⑤ 才跑真正的上传/索引/问答。</li>
+  </ol>
+  <p class="muted">第 6 步的顺序很关键：接口层的错误路径全部可以<strong>不联网验证</strong>（空问题、假 doc_id、漏字段），先把它们跑绿，再花真金白银调模型。</p>
+
+  <h2>九、能带走的可复用做法</h2>
+  <table>
+    <thead><tr><th>做法</th><th>什么时候能再用</th></tr></thead>
+    <tbody>
+      <tr><td>薄接口层（解析 / 委托 / 翻译）</td><td>任何 Web 项目。判断标准：删掉框架，核心库依然完整</td></tr>
+      <tr><td>内部 DTO 与对外 schema 分离 + <code>to_xxx()</code> 转换</td><td>只要内部结构和对外 API 的演进速度不同，就该这么拆</td></tr>
+      <tr><td>统一错误信封 <code>{error:{code,message}}</code></td><td>前端只需写一套错误处理；上游错误码原样透传</td></tr>
+      <tr><td>用 <code>app.state</code>（或框架等价物）挂应用级单例</td><td>有状态对象（连接池、索引、缓存）的标准挂法，测试可替换</td></tr>
+      <tr><td>"先离线后联网"的自测顺序</td><td>任何要调用外部付费接口的项目</td></tr>
+    </tbody>
+  </table>
+
+  <h2>十、亲手做一遍</h2>
+
+  <div class="note">
+    <span class="label">练习 A · 看一条请求的完整行程</span>
+    启动服务后打开 <code>http://127.0.0.1:8000/docs</code>，展开 <code>POST /api/qa</code>，点 "Try it out"，只填 <code>question</code>，Execute。
+    然后<strong>回头看终端</strong>：找找 <code>kbqa.pipeline</code> 打的"召回完成 / 重排完成 / 问答完成"三条日志——这就是你刚才那次点击在后端走过的路。
+  </div>
+
+  <div class="note">
+    <span class="label">练习 B · 亲手触发一次 422</span>
+    在 <code>/docs</code> 里把 <code>question</code> 清空再点 Execute，观察返回的是 <code>422</code> 和 <code>validation_error</code>。
+    提问：<strong>此时路由函数 <code>qa()</code> 里的代码执行了吗？</strong>（提示：校验发生在函数被调用之前。）
+  </div>
+
+  <div class="note">
+    <span class="label">练习 C · 区分"两种错"</span>
+    把 <code>.env</code> 里的 <code>DASHSCOPE_API_KEY</code> 末尾改错一位，重启服务，再调一次 <code>/api/qa</code>。看它返回的
+    <strong>状态码是不是 502</strong>、<code>code</code> 是不是百炼原始的 <code>invalid_api_key</code>。看完记得改回来。
+  </div>
+
+  <div class="note">
+    <span class="label">练习 D · 想清楚一个设计题</span>
+    如果接口层图省事，直接把内部的 <code>Document</code>（含 <code>Path</code> 对象）当响应吐出去，会有什么隐患？
+    把 <code>api/schemas.py</code> 里的 <code>DocumentOut.path: str</code> 想成"海关报关单"，说说它替谁挡了什么。
+  </div>
+
+  <h2>十一、自测（凭记忆答）</h2>
+
+  <div class="quiz" data-answer="b">
+    <p class="q">1. 判断"接口层写得够不够薄"，下面哪个标准最靠谱？</p>
+    <button class="quiz-option" data-key="a">路由函数的行数有没有超过 30 行</button>
+    <button class="quiz-option" data-key="b">把 Web 框架删掉，核心库是否依然完整可用</button>
+    <button class="quiz-option" data-key="c">接口数量是不是控制在了 10 个以内</button>
+    <button class="quiz-option" data-key="d">有没有用到框架提供的全部高级特性</button>
+    <p class="feedback"
+       data-correct="对。业务不属于框架——框架只是入口，删掉它核心逻辑应当毫发无伤。"
+       data-wrong="再想想：行数、数量都是表面。真正的标准是"业务逻辑有没有渗进接口层"。"></p>
+  </div>
+
+  <div class="quiz" data-answer="c">
+    <p class="q">2. 为什么接口层还要专门定义一套 `DocumentOut`，而不直接返回内部的 `Document`？</p>
+    <button class="quiz-option" data-key="a">因为 pydantic 无法序列化 dataclass 对象</button>
+    <button class="quiz-option" data-key="b">因为这样能让接口的响应速度明显变快</button>
+    <button class="quiz-option" data-key="c">为了让"对外形状"与"内部结构"解耦，各自独立演进</button>
+    <button class="quiz-option" data-key="d">因为 dunder 前缀的字段不允许被网络传输</button>
+    <p class="feedback"
+       data-correct="对。内部字段名/类型可以随便改，只要对外 schema 不变，前端就不受影响。"
+       data-wrong="再想想：这是"两套契约"的分工问题——内部怎么实现，不该绑架对外接口。"></p>
+  </div>
+
+  <div class="quiz" data-answer="a">
+    <p class="q">3. 上游百炼返回 `invalid_api_key`，接口应该怎么回？</p>
+    <button class="quiz-option" data-key="a">502，并把百炼的原始 code 原样透传给前端</button>
+    <button class="quiz-option" data-key="b">400，因为这是调用方把参数传错了</button>
+    <button class="quiz-option" data-key="c">200，让前端自己从消息里去找错误</button>
+    <button class="quiz-option" data-key="d">500，统一说一句"服务器内部错误"就可</button>
+    <p class="feedback"
+       data-correct="对。502 = 不是我的错；透传 code 才能让排查一步到位。"
+       data-wrong="再想想：400 是"你的错"，502 才是"上游的错"；把原始 code 藏起来只会让排查变难。"></p>
+  </div>
+
+  <div class="quiz" data-answer="d">
+    <p class="q">4. 为什么 `app.mount("/", ...)` 必须放在 `include_router(router)` 之后？</p>
+    <button class="quiz-option" data-key="a">因为 mount 在 include_router 之前调用会报语法错误</button>
+    <button class="quiz-option" data-key="b">因为两个函数必须按字母顺序先后调用</button>
+    <button class="quiz-option" data-key="c">因为 mount 会覆盖掉已有路由的响应模型定义</button>
+    <button class="quiz-option" data-key="d">因为 mount("/") 会兜住所有未匹配路径，抢走 /api/*</button>
+    <p class="feedback"
+       data-correct="对。路由按注册顺序匹配，"/" 是兜底的，必须排在最后。"
+       data-wrong="再想想：它俩都不报错，问题是匹配顺序——"/" 太贪心，会先把 /api/* 吃进去。"></p>
+  </div>
+
+  <h2>十二、想深入时读这个</h2>
+  <p><strong>首选一手资源：</strong>回到你自己的 <a href="../../docs/spec.md">docs/spec.md</a> §8 —— 那张路由表现在就是你的接口清单，<code>/docs</code> 页面上能一一对上。</p>
+  <p class="muted">外部延伸：<a href="https://fastapi.tiangolo.com/zh/tutorial/first-steps/">FastAPI 官方教程 · 第一步</a>（官方中文）、<a href="https://fastapi.tiangolo.com/zh/tutorial/response-model/">响应模型</a>（官方中文）、<a href="https://developer.mozilla.org/zh-CN/docs/Web/HTTP/Status">MDN · HTTP 状态码</a>（官方中文）。完整资源见 <a href="../RESOURCES.md">RESOURCES.md</a>。</p>
+
+  <div class="foot">
+    不清楚就直接问，比如"为什么错误要包一层 error 而不平铺""app.state 和全局变量到底差在哪"。我是你的老师，问多基础都可以。
+  </div>
+
+</div>
+<script src="../assets/quiz.js"></script>
+</body>
+</html>

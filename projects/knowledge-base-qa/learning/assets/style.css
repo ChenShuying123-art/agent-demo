@@ -1,0 +1,365 @@
+/* 课程共用样式：所有 lesson / reference 都链接这一份，保证像一门课而不是一堆散件。
+   主题：暗色系（暖调深色，沿用原先的纸质暖色气质）。
+   打印时自动切回浅色，避免打印出黑底。 */
+
+:root {
+  color-scheme: dark;
+
+  --ink: #e8e4da;          /* 正文文字 */
+  --muted: #9d978b;        /* 次要文字 */
+  --soft: #cdc8bd;         /* 引导语等介于两者之间的文字 */
+  --rule: #35322d;         /* 分隔线 / 边框 */
+  --paper: #171614;        /* 页面底色 */
+  --card: #201e1b;         /* 卡片 / 说明块底色 */
+  --code-bg: #232120;      /* 代码底色 */
+  --accent: #e0a765;       /* 强调色（链接、序号） */
+  --good: #7cc79a;
+  --bad: #e0857a;
+  --shadow: 0 1px 2px rgba(0, 0, 0, 0.5);
+
+  --win-bg: #1b2620;       /* 绿色提示块 */
+  --good-bg: #1c2a22;      /* 答对选项底色 */
+  --bad-bg: #2e1f1d;       /* 答错选项底色 */
+
+  --tag-syntax-fg: #bcabe8;
+  --tag-syntax-bg: #272338;
+  --tag-syntax-bd: #453d63;
+  --tag-eng-fg: #86cfa4;
+  --tag-eng-bg: #1b2a22;
+  --tag-eng-bd: #2f5340;
+}
+
+* { box-sizing: border-box; }
+
+html { -webkit-text-size-adjust: 100%; }
+
+body {
+  margin: 0;
+  background: var(--paper);
+  color: var(--ink);
+  font-family: "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, "Songti SC",
+    "Noto Serif SC", serif;
+  font-size: 18px;
+  line-height: 1.7;
+}
+
+.wrap {
+  max-width: 41rem;
+  margin: 0 auto;
+  padding: 3.5rem 1.4rem 6rem;
+}
+
+/* ---- 页眉 ---- */
+.eyebrow {
+  font-family: ui-sans-serif, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+  font-size: 0.72rem;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--muted);
+  margin: 0 0 0.6rem;
+}
+
+h1 {
+  font-size: 2rem;
+  line-height: 1.25;
+  margin: 0 0 0.6rem;
+  font-weight: 600;
+}
+
+h2 {
+  font-size: 1.32rem;
+  margin: 2.8rem 0 0.9rem;
+  padding-bottom: 0.35rem;
+  border-bottom: 1px solid var(--rule);
+  font-weight: 600;
+}
+
+h3 {
+  font-size: 1.06rem;
+  margin: 1.8rem 0 0.5rem;
+  font-weight: 600;
+}
+
+p { margin: 0.85rem 0; }
+
+.lede { font-size: 1.08rem; color: var(--soft); }
+
+.muted { color: var(--muted); }
+
+a { color: var(--accent); text-decoration-thickness: 1px; text-underline-offset: 2px; }
+a:hover { text-decoration-thickness: 2px; }
+
+ul, ol { padding-left: 1.3rem; }
+li { margin: 0.35rem 0; }
+
+/* ---- 说明块 ---- */
+.note {
+  background: var(--card);
+  border: 1px solid var(--rule);
+  border-radius: 10px;
+  padding: 0.9rem 1.1rem;
+  margin: 1.2rem 0;
+  box-shadow: var(--shadow);
+}
+
+.note .label {
+  font-family: ui-sans-serif, "Segoe UI", "PingFang SC", sans-serif;
+  font-size: 0.74rem;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--accent);
+  display: block;
+  margin-bottom: 0.3rem;
+}
+
+.win {
+  border-left: 3px solid var(--good);
+  background: var(--win-bg);
+  padding: 0.8rem 1.1rem;
+  border-radius: 0 10px 10px 0;
+  margin: 1.2rem 0;
+}
+
+/* ---- 代码 ---- */
+code {
+  font-family: ui-monospace, "Cascadia Code", Consolas, "SF Mono", Menlo, monospace;
+  font-size: 0.86em;
+  background: var(--code-bg);
+  padding: 0.12em 0.36em;
+  border-radius: 5px;
+}
+
+pre {
+  background: var(--code-bg);
+  border: 1px solid var(--rule);
+  border-radius: 10px;
+  padding: 0.9rem 1rem;
+  overflow-x: auto;
+  font-size: 0.84rem;
+  line-height: 1.6;
+}
+
+pre code { background: none; padding: 0; font-size: 1em; }
+
+/* ---- 表格 ---- */
+table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 1.3rem 0;
+  font-size: 0.92rem;
+}
+
+th, td {
+  text-align: left;
+  padding: 0.55rem 0.6rem;
+  border-bottom: 1px solid var(--rule);
+  vertical-align: top;
+}
+
+th {
+  font-family: ui-sans-serif, "Segoe UI", "PingFang SC", sans-serif;
+  font-size: 0.78rem;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+  text-transform: uppercase;
+}
+
+/* ---- 编号步骤 ---- */
+.steps { counter-reset: step; list-style: none; padding-left: 0; }
+.steps > li {
+  counter-increment: step;
+  position: relative;
+  padding-left: 2.6rem;
+  margin: 1.1rem 0;
+}
+.steps > li::before {
+  content: counter(step);
+  position: absolute;
+  left: 0;
+  top: 0.1rem;
+  width: 1.7rem;
+  height: 1.7rem;
+  border-radius: 50%;
+  background: var(--accent);
+  color: var(--paper);
+  font-family: ui-sans-serif, "Segoe UI", sans-serif;
+  font-size: 0.85rem;
+  display: grid;
+  place-items: center;
+}
+
+/* ---- 概念条目 / 术语表 ---- */
+.glossary { margin: 1.1rem 0; }
+.glossary dt { font-weight: 600; margin-top: 0.85rem; }
+.glossary dt:first-child { margin-top: 0; }
+.glossary dd { margin: 0.15rem 0 0; color: var(--soft); }
+
+/* 语法 / 工程 标签，用来区分两类概念 */
+.tag {
+  font-family: ui-sans-serif, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+  font-size: 0.66rem;
+  letter-spacing: 0.06em;
+  padding: 0.08em 0.5em;
+  border-radius: 999px;
+  border: 1px solid var(--rule);
+  color: var(--muted);
+  vertical-align: 0.12em;
+  white-space: nowrap;
+}
+.tag.syntax {
+  color: var(--tag-syntax-fg);
+  border-color: var(--tag-syntax-bd);
+  background: var(--tag-syntax-bg);
+}
+.tag.eng {
+  color: var(--tag-eng-fg);
+  border-color: var(--tag-eng-bd);
+  background: var(--tag-eng-bg);
+}
+
+/* ---- 测验 ---- */
+.quiz {
+  background: var(--card);
+  border: 1px solid var(--rule);
+  border-radius: 12px;
+  padding: 1.1rem 1.2rem;
+  margin: 1.4rem 0;
+}
+
+.quiz .q {
+  font-weight: 600;
+  margin: 0 0 0.8rem;
+}
+
+.quiz-option {
+  display: block;
+  width: 100%;
+  text-align: left;
+  font: inherit;
+  font-size: 0.95rem;
+  background: var(--paper);
+  color: var(--ink);
+  border: 1px solid var(--rule);
+  border-radius: 8px;
+  padding: 0.6rem 0.8rem;
+  margin: 0.4rem 0;
+  cursor: pointer;
+  transition: background 0.12s, border-color 0.12s;
+}
+
+.quiz-option:hover:not(:disabled) { border-color: var(--accent); }
+
+.quiz-option.correct {
+  border-color: var(--good);
+  background: var(--good-bg);
+  font-weight: 600;
+}
+.quiz-option.wrong {
+  border-color: var(--bad);
+  background: var(--bad-bg);
+}
+.quiz-option:disabled { cursor: default; opacity: 0.95; }
+
+.quiz .feedback {
+  display: none;
+  margin-top: 0.7rem;
+  font-size: 0.92rem;
+  border-top: 1px dashed var(--rule);
+  padding-top: 0.6rem;
+}
+.quiz .feedback.show { display: block; }
+
+/* ---- 图示（课程里的流程图） ---- */
+.diagram {
+  background: var(--card);
+  border: 1px solid var(--rule);
+  border-radius: 10px;
+  padding: 1.1rem 1rem;
+  margin: 1.4rem 0;
+}
+
+.diagram .drow { display: flex; gap: 0.6rem; }
+
+.diagram .dbox {
+  flex: 1;
+  background: var(--paper);
+  border: 1px solid var(--rule);
+  border-radius: 8px;
+  padding: 0.55rem 0.7rem;
+  text-align: center;
+  font-size: 0.88rem;
+  line-height: 1.45;
+}
+
+.diagram .dbox strong { display: block; font-weight: 600; }
+
+.diagram .dbox span {
+  display: block;
+  margin-top: 0.22rem;
+  color: var(--muted);
+  font-size: 0.78rem;
+  font-family: ui-monospace, "Cascadia Code", Consolas, monospace;
+}
+
+.diagram .dbox.lead { border-color: var(--accent); }
+
+.diagram .darrow {
+  text-align: center;
+  margin: 0.5rem 0;
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+
+.diagram .dcap {
+  margin: 0.75rem 0 0;
+  text-align: center;
+  font-size: 0.78rem;
+  color: var(--muted);
+  font-family: ui-sans-serif, "Segoe UI", "PingFang SC", sans-serif;
+}
+
+@media (max-width: 520px) {
+  .diagram .drow { flex-direction: column; }
+}
+
+/* ---- 页脚 ---- */
+.foot {
+  margin-top: 3.5rem;
+  padding-top: 1.2rem;
+  border-top: 1px solid var(--rule);
+  font-size: 0.9rem;
+  color: var(--muted);
+}
+
+/* ---- 打印：切回浅色，省墨且可读 ---- */
+@media print {
+  :root {
+    color-scheme: light;
+
+    --ink: #000;
+    --muted: #555;
+    --soft: #333;
+    --rule: #bbb;
+    --paper: #fff;
+    --card: #f5f5f5;
+    --code-bg: #f0f0f0;
+    --accent: #000;
+    --good: #000;
+    --bad: #000;
+    --shadow: none;
+
+    --win-bg: #f5f5f5;
+    --good-bg: #f5f5f5;
+    --bad-bg: #f5f5f5;
+
+    --tag-syntax-fg: #000;
+    --tag-syntax-bg: #f5f5f5;
+    --tag-syntax-bd: #bbb;
+    --tag-eng-fg: #000;
+    --tag-eng-bg: #f5f5f5;
+    --tag-eng-bd: #bbb;
+  }
+  body { background: #fff; font-size: 12pt; }
+  .quiz-option { border-color: #bbb; }
+  a { color: #000; }
+}

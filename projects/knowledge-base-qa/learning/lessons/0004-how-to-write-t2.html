@@ -1,0 +1,171 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>课程 0004 · 把"算法描述"变成代码：拆解 T2</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+<div class="wrap">
+
+  <p class="eyebrow">课程 0004 · RAG 项目实战 · 对应任务 T2</p>
+  <h1>把"算法描述"变成代码：拆解 T2</h1>
+  <p class="lede">T0 讲模块顺序，T1 讲单个函数，这一课讲<strong>把一个用自然语言描述的算法，翻译成能跑、且能自证正确的代码</strong>。T2 的切分算法不长，但"想清楚"的部分比"写"的部分多得多。</p>
+
+  <div class="win">
+    <strong>学完你能做到：</strong>拿到一段"先按 A 切、再按 B 合并、必要时 C"这类策略描述，能把它拆成明确的判定条件、写出会前进的循环，并用不变量自证没写错。
+    <br><span class="muted">配套：<a href="../reference/python-concepts-glossary.html">术语表</a> · 前置 <a href="0002-reading-t0-code.html">0002</a> / <a href="0003-how-to-write-t1.html">0003</a></span>
+  </div>
+
+  <h2>一、T2 的真正难点：把模糊的词变成精确的规则</h2>
+  <p>spec §7.4 的策略是自然语言写的，第一条就是："先按空行切分段落；md 的 <code>#</code> 标题行作为强边界。"</p>
+  <p>这句话不能直接写成代码——你必须先回答四个问题：</p>
+  <table>
+    <thead><tr><th>模糊的说法</th><th>必须变成的精确规则</th></tr></thead>
+    <tbody>
+      <tr><td>"空行"</td><td>正则 <code>\n[ \t]*\n</code>（两个换行之间只有空白）</td></tr>
+      <tr><td>"边界"</td><td>一个<strong>位置</strong>（段落的起点），不是一段文字</td></tr>
+      <tr><td>"# 标题行"</td><td>行首 ≤3 空格 + 1~6 个 <code>#</code> + 一个空白字符</td></tr>
+      <tr><td>"强"边界</td><td>"优先选它"，即搜索时先搜强边界，搜不到再退而求其次</td></tr>
+    </tbody>
+  </table>
+  <p><strong>这一步就是全部功夫。</strong> 新手写不出来，往往不是不会写循环，而是没有把"空行""强边界"这些词逼问成可判定的事实。</p>
+
+  <h2>二、核心套路：先枚举候选，再做选择</h2>
+  <p>一个常见的错误思路是"一边扫描一边切"——那样要同时维护一堆状态，很容易乱。更好的做法分两步：</p>
+  <ol class="steps">
+    <li><strong>先把"所有允许切的位置"算出来</strong>，分成强边界（标题/段落）和弱边界（换行/句末）两级。这一步只产出位置，不产出文本。</li>
+    <li><strong>再逐块贪心选择</strong>：在窗口 <code>(start + overlap, start + chunk_size]</code> 里，挑<em>最大</em>的那个候选切点。</li>
+  </ol>
+  <p>主干只有这么几行：</p>
+  <pre><code>start = 0
+while True:
+    limit = start + chunk_size
+    if limit &gt;= n:
+        end = n                       # 剩下不足一块，直接收尾
+    else:
+        end = 最大候选切点 in (start + overlap, limit]   # 强边界优先，其次弱边界
+        if end is None:
+            end = limit               # 附近没有边界：硬切
+    产出 chunk(start, end)
+    if end &gt;= n:
+        break
+    start = end - chunk_overlap       # 回退，形成重叠</code></pre>
+  <p class="muted">"先枚举候选、再做选择"是个很通用的拆解思路：把"在哪里做决定"和"怎么做决定"分开，各自都很简单。</p>
+
+  <h2>三、五个必须想清楚的点</h2>
+
+  <h3>1. 位置不变量：<code>text[start:end] == chunk_text</code></h3>
+  <p>这是 T2 验收里单独列出的第 ③ 条，也是最重要的一条。<strong>为什么？</strong> 因为后面做问答时要给出引用——"这句话出自原文第几段"。如果 <code>start/end</code> 错位一个字符，引用就会指到别处。</p>
+  <p>这类"任何情况下都必须成立"的断言叫<strong>不变量（invariant）</strong>。写算法时先问自己"什么必须永远成立"，再把它写成断言去跑——这比事后肉眼检查可靠得多。</p>
+
+  <h3>2. 重叠怎么做到"恰好"是 overlap</h3>
+  <p>很多人会想"把上一块的尾巴拼到下一块的头上"。其实不用拼接，只要一个减法：</p>
+  <pre><code>start = end - chunk_overlap   # 下一块的起点 = 上一块的终点 - overlap</code></pre>
+  <p>这样相邻两块的重叠<strong>恰好</strong>是 <code>chunk_overlap</code> 个字符，不需要任何额外的拼接或裁剪。</p>
+
+  <h3>3. 这个循环一定会前进吗？（防死循环）</h3>
+  <p>写 <code>while</code> 时最该问的一句话是：<strong>每轮结束，位置一定往前走吗？</strong></p>
+  <p>如果 <code>overlap &gt;= chunk_size</code>，那么每块最多推进 0 个字符——位置原地踏步，程序永远跑不完。所以开头就把 overlap 收窄到 <code>chunk_size - 1</code>，并打一条 <code>WARNING</code>（让调用者知道配置被改过，而不是默默出错）。</p>
+
+  <h3>4. 优先级：强边界 &gt; 弱边界 &gt; 硬切</h3>
+  <p>为什么把 md 的 <code>#</code> 标题当<strong>强</strong>边界？因为标题代表新章节。如果一个 chunk 横跨两个章节，它讲的是两件事——检索命中它时，内容会"驴唇不对马嘴"。为了语义干净，宁可让这个 chunk 短一点。</p>
+
+  <h3>5. 窗口下界为什么用 <code>start + overlap</code></h3>
+  <p>如果允许在紧挨着起点的位置切（比如只前进 3 个字符），下一块就几乎和上一块一模一样，既浪费又危险。要求"本块必须比 overlap 长"，一举两得：既保证重叠完整，又保证一定能前进。</p>
+
+  <div class="note">
+    <span class="label">一句话总结</span>
+    算法的正确性，往往不取决于主流程，而取决于这几条<strong>边界规则</strong>。写之前先把边界想清楚，代码会短得让你意外。
+  </div>
+
+  <h2>四、实测数据：chunk_size 到底怎么选</h2>
+  <p>拿 <code>docs/spec.md</code>（32655 字符）实跑，overlap 固定 80：</p>
+  <table>
+    <thead><tr><th>chunk_size</th><th>chunk 数</th><th>平均每块</th></tr></thead>
+    <tbody>
+      <tr><td>200</td><td>370</td><td>约 88 字符（扣除重叠）</td></tr>
+      <tr><td>500</td><td>96</td><td>约 340 字符</td></tr>
+      <tr><td>800</td><td>56</td><td>约 580 字符</td></tr>
+    </tbody>
+  </table>
+  <p>规律：<strong>size 越小，chunk 数近似线性增长</strong>。这带来一个权衡——</p>
+  <ul>
+    <li>太小 → 每块信息不全，检索到的片段"缺胳膊少腿"，模型答不完整；</li>
+    <li>太大 → 每块混入很多无关内容，噪声拉低答案质量，还浪费上下文长度。</li>
+  </ul>
+  <p class="muted">500 是个常见起点，不是标准答案。§13 的评测会告诉你，对你自己的文档来说哪个更好。</p>
+
+  <h2>五、亲手做一遍</h2>
+  <div class="note">
+    <span class="label">练习 A · 把自然语言变成规则</span>
+    只看 spec §7.4 的五步策略，先别打开 <code>chunking.py</code>。对每一步写出一句"可执行的判定"（比如把"空行"写成正则）。写完再对照真实实现，看你漏了哪条边界。
+  </div>
+  <div class="note">
+    <span class="label">练习 B · 改坏它，看后果</span>
+    把 <code>_pick_largest</code> 改成"取窗口里<em>第一个</em>切点"（而不是最大的），重跑，观察 chunk 数怎么变化、平均长度怎么变化。想清楚：为什么"取最大"能减少碎片？
+  </div>
+  <div class="note">
+    <span class="label">练习 C · 亲手跑出那张表</span>
+    打开 <code>notebooks/01_indexing.ipynb</code>，跑一遍，然后改 <code>chunk_size=200</code> 与 <code>800</code>，把结论记一行到 Notebook 里。
+  </div>
+
+  <h2>六、自测（凭记忆答）</h2>
+
+  <div class="quiz" data-answer="a">
+    <p class="q">1. 每个 chunk 记录 <code>start/end</code>，最主要是为了什么？</p>
+    <button class="quiz-option" data-key="a">为了按位置对原文做引用定位</button>
+    <button class="quiz-option" data-key="b">为了压缩存储节省磁盘空间</button>
+    <button class="quiz-option" data-key="c">为了给每个片段分配唯一编号</button>
+    <button class="quiz-option" data-key="d">为了让排序结果保持稳定一致</button>
+    <p class="feedback"
+       data-correct="对。位置不错位，答案里的引用才指得准——这是 T2 验收第 ③ 条的意义。"
+       data-wrong="再想想：位置元数据是给"引用定位"用的。"></p>
+  </div>
+
+  <div class="quiz" data-answer="a">
+    <p class="q">2. 相邻 chunk 的字符重叠，代码里是怎么实现的？</p>
+    <button class="quiz-option" data-key="a">下一块从上一块终点回退若干字符</button>
+    <button class="quiz-option" data-key="b">下一块把上一块的文本复制一份</button>
+    <button class="quiz-option" data-key="c">每块结尾统一补上省略号占位</button>
+    <button class="quiz-option" data-key="d">切完后单独计算一次文本交集</button>
+    <p class="feedback"
+       data-correct="对。start = end - overlap，一个减法就得到恰好 overlap 个字符的重叠。"
+       data-wrong="再想想：不需要拼接，只要把下一块的起点往前回退 overlap 个字符。"></p>
+  </div>
+
+  <div class="quiz" data-answer="a">
+    <p class="q">3. 写这类切分循环，最需要警惕的是什么？</p>
+    <button class="quiz-option" data-key="a">位置推不动导致反复切同一段</button>
+    <button class="quiz-option" data-key="b">切点数量太多拖慢了运行速度</button>
+    <button class="quiz-option" data-key="c">片段文本里混入了空白的字符</button>
+    <button class="quiz-option" data-key="d">强边界比弱边界优先级更高一些</button>
+    <p class="feedback"
+       data-correct="对。overlap >= chunk_size 时每轮推进 <= 0，会死循环——所以要收窄并告警。"
+       data-wrong="再想想：while 循环每轮必须前进，否则就死循环。overlap 太大时正会这样。"></p>
+  </div>
+
+  <div class="quiz" data-answer="a">
+    <p class="q">4. 为什么把 md 的 <code>#</code> 标题当作强边界？</p>
+    <button class="quiz-option" data-key="a">避免一个 chunk 横跨两个不同章节</button>
+    <button class="quiz-option" data-key="b">让标题文字不被计入字符数量中</button>
+    <button class="quiz-option" data-key="c">让 chunk 的总数量变得更多一些</button>
+    <button class="quiz-option" data-key="d">避免标题被切成单独的短片段</button>
+    <p class="feedback"
+       data-correct="对。跨章节的 chunk 语义混杂，检索命中它时内容会驴唇不对马嘴。"
+       data-wrong="再想想：标题代表新章节，切在标题处是为了让每块语义干净。"></p>
+  </div>
+
+  <h2>七、想深入时读这个</h2>
+  <p><strong>首选一手资源：</strong><a href="https://docs.python.org/zh-cn/3/library/re.html">Python 官方文档 · re 正则表达式操作（官方中文）</a>——本课的"识别空行/标题行"全靠它。重点看 "正则表达式语法" 一节里的 <code>^</code>、<code>\n</code> 与量词。</p>
+  <p class="muted">完整资源见 <a href="../RESOURCES.md">RESOURCES.md</a>；术语随时查 <a href="../reference/python-concepts-glossary.html">概念术语表</a>。建议顺序：0002 → 0001 → 0003 → 0004。</p>
+
+  <div class="foot">
+    不清楚就直接问，比如"为什么 <code>^</code> 要配 <code>(?m)</code> 才能匹配每一行的行首"。我是你的老师，问多基础都可以。
+  </div>
+
+</div>
+<script src="../assets/quiz.js"></script>
+</body>
+</html>

@@ -1,0 +1,219 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>前置课 · 读懂 T0 的每一行：语法与工程概念</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+<div class="wrap">
+
+  <p class="eyebrow">前置课 · 建议在课程 0001 之前读</p>
+  <h1>读懂 T0 的每一行：语法与工程概念</h1>
+  <p class="lede">这节课<strong>不</strong>教你怎么写，只把 T0 代码里出现的每个"零件"拆给你看——两个标签：<span class="tag syntax">语法</span>是 Python 语言本身的东西，<span class="tag eng">工程</span>是"大家都这么干"的惯例。按你要求的<strong>代码顺序</strong>走：<code>models → config → logging_conf → __init__</code>。</p>
+
+  <div class="win">
+    <strong>读完你能做到：</strong>打开 <code>kbqa/</code> 里任意一个文件，逐行说出每一块在干什么，不再有"这行是啥意思"的卡顿。
+    <br><span class="muted">配套术语表：<a href="../reference/python-concepts-glossary.html">Python 概念术语表</a> · 读完再看 <a href="0001-how-to-write-t0.html">课程 0001（方法课）</a></span>
+  </div>
+
+  <div class="note">
+    <span class="label">怎么用这节课</span>
+    不要背。每一站先看真实代码，再读下面的概念条目；哪条已经懂了就跳过。<strong>不用一次读完</strong>——先读第 1、2 站就够你重新打开 <code>config.py</code> 了。
+  </div>
+
+  <h2>第 1 站 · <code>models.py</code></h2>
+  <p>真实代码（节选）：</p>
+  <pre><code>from dataclasses import dataclass
+from datetime import datetime
+from pathlib import Path
+
+
+@dataclass
+class Document:
+    """一篇已上传文档的元数据。"""
+
+    doc_id: str          # 内容 sha256 前 16 位，用于去重
+    filename: str
+    size: int
+    uploaded_at: datetime
+    indexed: bool = False</code></pre>
+
+  <dl class="glossary">
+    <dt>模块（module）<span class="tag eng">工程</span></dt>
+    <dd>一个 <code>.py</code> 文件就是一个模块，文件名去掉 <code>.py</code> 就是模块名。所以 <code>models.py</code> 这个模块就叫 <code>models</code>。</dd>
+
+    <dt><code>from … import …</code><span class="tag syntax">语法</span></dt>
+    <dd>意思是"从某个模块里，把某个名字拿来用"。<code>from dataclasses import dataclass</code> = 从标准库 <code>dataclasses</code> 里拿 <code>dataclass</code>。<strong>不 import 就用不了</strong>——这是 Python 里"东西从哪来"的唯一入口。</dd>
+
+    <dt>类型注解 <code>doc_id: str</code><span class="tag syntax">语法</span></dt>
+    <dd>冒号后面是"注解"，告诉人和工具"这个字段应该是字符串"。<strong>Python 运行时不会检查它</strong>，它更像说明书而不是规则。注意：它<em>不是</em>赋值。</dd>
+
+    <dt>默认值 <code>indexed: bool = False</code><span class="tag syntax">语法</span></dt>
+    <dd>等号后面才是真正的赋值。意思是"创建时如果不给 <code>indexed</code>，就用 <code>False</code>"。</dd>
+
+    <dt>类 <code>class</code><span class="tag syntax">语法</span></dt>
+    <dd>把"一堆数据 + 一堆行为"打包成一个自定义类型。这里的 <code>Document</code> 只装数据，不带行为。</dd>
+
+    <dt>装饰器 <code>@dataclass</code><span class="tag syntax">语法</span></dt>
+    <dd>装饰器 = 贴在类或函数上面、替它"加工"一下的东西。<code>@dataclass</code> 会自动帮你生成 <code>__init__</code> 等方法，所以你才能写 <code>Document(doc_id="x", size=1)</code>；没有它，你得手写一大堆"把参数存到 self"的代码。<span class="muted">（<code>@</code> 开头的那一行就是装饰器）</span></dd>
+
+    <dt>docstring<span class="tag syntax">语法</span></dt>
+    <dd>写在类/函数第一行的三引号字符串，是它的说明。IDE 悬停提示和 <code>help()</code> 读的就是它。</dd>
+  </dl>
+
+  <h2>第 2 站 · <code>config.py</code></h2>
+  <p>真实代码（节选）：</p>
+  <pre><code>class Settings(BaseSettings):
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        case_sensitive=False,
+    )
+
+    dashscope_api_key: str              # 没有默认值
+    chat_model: str = "qwen-plus"       # 有默认值
+    embedding_dim: int = 1024
+
+
+settings = Settings()</code></pre>
+
+  <dl class="glossary">
+    <dt>继承 <code>class Settings(BaseSettings)</code><span class="tag syntax">语法</span></dt>
+    <dd>括号里的是"父类"。写成这样，<code>Settings</code> 就<strong>白得</strong>了 <code>BaseSettings</code> 的全部能力（自动读环境变量、做类型转换和校验），只需再补充自己的字段。这就是为什么你没写一行"读 .env"的代码，它却会读。</dd>
+
+    <dt>类属性 <code>model_config = …</code><span class="tag syntax">语法</span></dt>
+    <dd>写在类里面、缩进一级的变量，属于"这个类本身"，不是属于某个具体对象。这里它是用来配置 pydantic 的行为（去哪个文件读、大小写敏不敏感）。</dd>
+
+    <dt>环境变量<span class="tag eng">工程</span></dt>
+    <dd>活在操作系统里、程序外面的一组"键 = 值"，程序可以读。为什么不用代码里的常量？因为密钥、地址这类东西<strong>会随部署环境变化</strong>，而代码不该变。</dd>
+
+    <dt><code>.env</code> 文件<span class="tag eng">工程</span></dt>
+    <dd>本地开发时，把环境变量按 <code>KEY=VALUE</code> 写进一个文件，省得每次开终端手动设。它<strong>绝不能被提交进 git</strong>（因为里面有密钥），所以仓库里只放一份 <code>.env.example</code> 当模板。</dd>
+
+    <dt>配置外置<span class="tag eng">工程</span></dt>
+    <dd>"会随环境变化的东西，一律放环境变量，不写进代码"。判断标准很妙：<em>这份代码能不能直接开源，而不泄露任何凭证？</em> 见 <a href="https://12factor.net/zh_cn/config">12-Factor App · 配置（中文）</a>。</dd>
+
+    <dt>fail fast：密钥不写默认值<span class="tag eng">工程</span></dt>
+    <dd><code>dashscope_api_key: str</code> 后面空着，意味着"缺它就直接报错"。宁可启动时立刻崩，也不要带着一个空密钥继续跑，最后在某个深夜炸出一个莫名其妙的 <code>401</code>。</dd>
+
+    <dt>模块级单例 <code>settings = Settings()</code><span class="tag eng">工程</span></dt>
+    <dd>这一行在文件被 import 时<strong>只执行一次</strong>，全项目拿到的都是同一个对象。若每个模块各建一个，就会出现"这里读到的模型名和那里不一样"的诡异 bug。</dd>
+
+    <dt>大小写不敏感<span class="tag eng">工程</span></dt>
+    <dd><code>.env</code> 里写 <code>CHAT_MODEL</code>（惯例大写），会填到 <code>chat_model</code>（Python 惯例小写）。你不用手写转换。</dd>
+  </dl>
+
+  <h2>第 3 站 · <code>logging_conf.py</code></h2>
+  <p>真实代码（节选）：</p>
+  <pre><code>def setup_logging(level: str | None = None) -&gt; None:
+    resolved = (level or settings.log_level).upper()
+    logging.basicConfig(
+        level=resolved,
+        format=_LOG_FORMAT,
+        force=True,
+    )</code></pre>
+
+  <dl class="glossary">
+    <dt>函数定义 <code>def 名字(参数):</code><span class="tag syntax">语法</span></dt>
+    <dd><code>def</code> 是"定义函数"。后面括号里是参数，冒号下面缩进的就是函数体。</dd>
+
+    <dt>联合类型 <code>str | None</code><span class="tag syntax">语法</span></dt>
+    <dd>读作"字符串 <em>或</em> None"。表示这个参数要么传一个字符串，要么传"什么都没有"。</dd>
+
+    <dt>参数默认值 <code>= None</code><span class="tag syntax">语法</span></dt>
+    <dd>调用时不传这个参数，就自动用 <code>None</code>。所以 <code>setup_logging()</code> 和 <code>setup_logging("DEBUG")</code> 都能调用。</dd>
+
+    <dt>返回类型 <code>-&gt; None</code><span class="tag syntax">语法</span></dt>
+    <dd>箭头后面说明"这个函数返回什么"。<code>None</code> 表示它不返回有意义的值，只是"干活"（这里是把日志配置好）。</dd>
+
+    <dt>关键字参数 <code>force=True</code><span class="tag syntax">语法</span></dt>
+    <dd>按名字传参，而不是按位置。<code>force=True</code> 是传给 <code>basicConfig</code> 的一个开关：强制重建日志配置，保证 Notebook 里格式也统一。</dd>
+
+    <dt>logging<span class="tag eng">工程</span></dt>
+    <dd>标准库，用来输出<strong>分级别</strong>的信息：<code>DEBUG &lt; INFO &lt; WARNING &lt; ERROR</code>。比 <code>print</code> 强在：能按级别一键过滤、能自带时间和模块名、上线时能整开关掉。</dd>
+
+    <dt>为什么集中配一次<span class="tag eng">工程</span></dt>
+    <dd>如果每个文件都自己配格式，同一份日志会长出五种样子。所以规则是：格式只在一个地方定义，各模块只写 <code>logging.getLogger(__name__)</code> 取自己的 logger。</dd>
+  </dl>
+
+  <h2>第 4 站 · <code>__init__.py</code></h2>
+  <p>真实代码（全部）：</p>
+  <pre><code>from kbqa.logging_conf import setup_logging
+
+setup_logging()</code></pre>
+
+  <dl class="glossary">
+    <dt>包（package）<span class="tag eng">工程</span></dt>
+    <dd>一个文件夹 + 里面放一个 <code>__init__.py</code>，Python 就把它当成一个可以 <code>import</code> 的"包"。<code>kbqa/</code> 就是包。</dd>
+
+    <dt><code>import kbqa</code> 时发生了什么<span class="tag eng">工程</span></dt>
+    <dd>Python 会<strong>执行一次 <code>kbqa/__init__.py</code> 里的代码</strong>。所以这行 <code>setup_logging()</code> 会自动跑——只要有人 import 了这个包，日志就统一好了。</dd>
+
+    <dt>为什么只放一行<span class="tag eng">工程</span></dt>
+    <dd>因为 import 包就会连带执行它。入口越轻越好；若在这里 import 一堆业务模块，那么"只想要个配置"的人也会被迫加载全部东西。</dd>
+  </dl>
+
+  <div class="note">
+    <span class="label">回头打通</span>
+    课程 0001 说"从叶子往根写"，第一片叶子是 <code>models.py</code>。现在你能看懂为什么了：它 import 的<strong>全是标准库</strong>（<code>dataclasses</code> / <code>datetime</code> / <code>pathlib</code>），<strong>一个本项目文件都没有</strong>——所以它写完就能立刻单独验证。
+  </div>
+
+  <h2>自测（凭记忆答）</h2>
+
+  <div class="quiz" data-answer="b">
+    <p class="q">1. <code>doc_id: str</code> 里的 <code>: str</code>，运行时起什么作用？</p>
+    <button class="quiz-option" data-key="a">强制检查 doc_id 是字符串</button>
+    <button class="quiz-option" data-key="b">给人和工具看的说明</button>
+    <button class="quiz-option" data-key="c">把 doc_id 自动转成字符串</button>
+    <button class="quiz-option" data-key="d">给 doc_id 设一个默认字符串</button>
+    <p class="feedback"
+       data-correct="对。注解是说明书，不是规则——Python 运行时不会因为类型不符而报错。"
+       data-wrong="再想想：注解是写给人和工具（IDE/类型检查器）看的，运行时并不强制检查。"></p>
+  </div>
+
+  <div class="quiz" data-answer="b">
+    <p class="q">2. <code>class Settings(BaseSettings)</code> 括号里的 BaseSettings 是什么？</p>
+    <button class="quiz-option" data-key="a">一个需要先实例化的变量</button>
+    <button class="quiz-option" data-key="b">被 Settings 继承的父类名</button>
+    <button class="quiz-option" data-key="c">Settings 的一个字段默认值</button>
+    <button class="quiz-option" data-key="d">一个生成注释用的装饰器</button>
+    <p class="feedback"
+       data-correct="对。继承让 Settings 白得父类的读环境变量、校验、类型转换等能力。"
+       data-wrong="再想想：括号里是父类——Settings 从这里继承能力，再补充自己的字段。"></p>
+  </div>
+
+  <div class="quiz" data-answer="b">
+    <p class="q">3. 你写 <code>import kbqa</code> 时，Python 会做什么？</p>
+    <button class="quiz-option" data-key="a">只把 kbqa 这个名字登记一下</button>
+    <button class="quiz-option" data-key="b">执行包入口里的那几行代码</button>
+    <button class="quiz-option" data-key="c">把包下面所有模块都执行一遍</button>
+    <button class="quiz-option" data-key="d">只加载包里排行最前的模块</button>
+    <p class="feedback"
+       data-correct="对。import 包 = 执行 __init__.py 一次，所以那行 setup_logging() 会自动跑。"
+       data-wrong="再想想：import 一个包，会执行它的 __init__.py——这正是日志能被自动初始化的原因。"></p>
+  </div>
+
+  <div class="quiz" data-answer="a">
+    <p class="q">4. <code>@dataclass</code> 主要帮你做了什么？</p>
+    <button class="quiz-option" data-key="a">自动生成初始化方法等</button>
+    <button class="quiz-option" data-key="b">自动把字段加密后保存</button>
+    <button class="quiz-option" data-key="c">自动校验每个字段类型</button>
+    <button class="quiz-option" data-key="d">自动生成对应单元测试</button>
+    <p class="feedback"
+       data-correct="对。它替你把 __init__、__repr__ 等样板代码生成出来，你只管声明字段。"
+       data-wrong="再想想：dataclass 生成的是 __init__ / __repr__ 这类样板方法，不加密、不校验类型。"></p>
+  </div>
+
+  <h2>想深入时读这个</h2>
+  <p><strong>首选一手资源：</strong><a href="https://docs.python.org/zh-cn/3/tutorial/classes.html">Python 官方教程 · 9. 类（官方中文）</a>——把"类、继承、属性"讲得最权威。第 1、2 站涉及的部分读完就够。</p>
+  <p class="muted">完整资源见 <a href="../RESOURCES.md">RESOURCES.md</a>；术语随时查 <a href="../reference/python-concepts-glossary.html">概念术语表</a>。建议顺序：<strong>本课 → 课程 0001（方法课）</strong>。</p>
+
+  <div class="foot">
+    任何一条看不懂，直接问我——可以让我用它在你自己的代码里再举一个例子。我是你的老师，不用怕问基础问题。
+  </div>
+
+</div>
+<script src="../assets/quiz.js"></script>
+</body>
+</html>
