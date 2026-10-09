@@ -23,7 +23,8 @@ data/index/*
 # ---------- Node / Vue 前端 ----------
 node_modules/
 web/dist/
+web/.npm-cache/
 *.local
 
-# ---------- 个人学习材料：仅本地，不入库 ----------
-learning/
+# ---------- 个人材料（要入库）----------
+# learning/（教学材料）与 samples/（私有测试样例）都随仓库提交，因此不加忽略规则。
