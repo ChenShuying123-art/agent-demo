@@ -52,6 +52,7 @@ class RerankResult:
     rerank_score: float  # 与 cosine 尺度不同，不可混用
     original_rank: int  # 重排前在召回列表中的位置（★ 看排序变化）
     new_rank: int
+    degraded: bool = False  # 是否走了降级路径（未真正重排）；降级时 rerank_score 其实是 cosine 分数
 
 
 @dataclass
