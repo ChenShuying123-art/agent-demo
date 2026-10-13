@@ -46,6 +46,21 @@
   前端要做"状态徽标 / chunk 数"就得先补上这一处跨模块修改（需用户确认后再动 `loaders.py`）。
 
 ## T10 已完成（2026-10-06）—— FastAPI 接口层
+
+## Agent 化规划已定（2026-10-13）—— 新任务 T15–T27
+
+- 目标：在现有 RAG MVP 之上"加工具 + 加 MCP + 加 skill"，用于**学习 agent 开发**。已确认的边界：
+  - 保留固定链路 `/api/qa` 作对照；agent 走新路由 `/api/agent/chat`。
+  - 四类工具：知识库检索、日期/时间（**本地计算**，不接第三方）、百度搜索、天气/生活服务。
+  - "生成 markdown 文件"用**自写 MCP server + agent 作 MCP client**，md 落 `data/exports/`。
+  - skill 面向**本 agent**（提示词 + 工具子集，按需加载）；触发方式**模型自动 + 用户显式都要**。
+  - 前端：工具轨迹面板（T20）与流式（T27）都要，作为后续任务。
+- 设计契约：`docs/spec.md` §19；任务卡：`docs/tasks.md` §6（T15–T27）。
+- 待外网确认（批次 B 开工前）：百度搜索用哪个 API、天气用哪家、各自 Key；本机沙箱默认无外网，需"先 mock 再真实"。
+- 教学安排（沿用"一任务一课"）：从 `lessons/0018-*.html` 起，建议主题序列：
+  工具 schema → agent loop → 工具结果裁剪与错误处理 → 轨迹可观测 → MCP（client/server / stdio）→ skill 渐进披露 → 流式。
+  每课照旧回答两问：① 我自己从零写会怎么做 ② 能带走什么。
+- 状态备注：T11 已完成（见 git log），旧条目"进行中的范围：已完成 T0–T10"已过期；T12–T14（出题 / 评测 / 复盘）与本次 Agent 化并行、不冲突。
 - 新增 `api/schemas.py` / `api/routes.py` / `api/main.py`，**未改动 `kbqa/` 任何文件**（薄接口层）。
 - ⚠️ **路由数 8 而非 tasks.md 写的 9**：spec §8 表实为 10 条，其中 `/api/eval/prompt`、`/api/eval/ablation` 依赖 T13 才写的 `kbqa/evaluate.py`，
   经用户确认**留到 T13 完成后补挂**。本轮实现：health / documents(GET,POST,DELETE) / index / retrieve / qa / qa.compare。
