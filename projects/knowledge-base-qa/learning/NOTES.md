@@ -204,3 +204,190 @@
   现在 T4 已定义 `data/index/docs.json` 格式（`{doc_id: {filename, chunks, indexed_at}}`），
   按 spec §7.3 应由 `list_documents` 读取它并合并出 `indexed` / `chunk_count`。
   因 tasks.md 纪律要求"改已完成文件前先说明并等确认"，此处**尚未改**。
+
+## T15 已完成（2026-10-17）—— 工具基础层（Agent 化第一批）
+- 新增 `kbqa/tools/base.py`、`kbqa/tools/__init__.py`：`ToolResult` / `Tool` / `ToolRegistry` / `@tool`。
+- 边界：不实现 agent loop、不实现具体工具、不碰 `llm.py`；handler 异常本层不捕获（留给 T18）。
+- 实测：`schemas()` 结构正确（type/function/name/description/parameters）；`echo` 调用返回 `hi`；重名抛 `ValueError`；handler 异常原样上抛；无新增依赖。
+- 设计要点：参数统一为一个 `dict`（registry 才能统一调度）；`parameters` 手写 JSON Schema（模型看的就是这份）；重名 fail fast。
+- 教学：新增课程 `lessons/0018-how-to-write-t15.html`；术语表新增 `Callable` / JSON Schema / 注册表 / tool & tool_call；资源清单补 Callable、JSON Schema、Function calling。
+- 下一步：T16（LLM 工具调用，§19.6）。
+
+## T16 已完成（2026-10-18）—— LLM 工具调用
+- `kbqa/models.py` 新增 `ToolCall` / `ChatResult`；`kbqa/llm.py` 的 `LLMProvider` 新增 `chat_with_tools`，`DashScopeChat` 实现。
+- **`chat()` 一行未改**：`git diff` 只有新增行，固定链路无回归风险。
+- 实测：
+  - 传 echo schema +「请调用 echo 说 hi」→ `tool_calls=[("echo", '{"text": "hi"}')]`，`finish_reason=tool_calls`（1336ms）
+  - 回填 `role="tool"` 后再调 → `tool_calls=0`，`content="hi"`，`finish_reason=stop`（459ms）
+  - `tools=[]` 与 `chat()` 同题各跑一次 → 均 77 字、均非空
+- 设计要点：`tools=[]` 时**不传该字段**（空数组部分实现会拒绝，且不传才与 chat() 等价）；`content` 可为 None（只请求工具）；既无 content 又无 tool_calls 才报 `empty_content`；工具参数日志截断至 50 字符。
+- 教学：新增课程 `lessons/0019-how-to-write-t16.html`；术语表新增 `finish_reason`；资源清单改用中文 Function Calling 文档（Microsoft Learn / 阿里云百炼）。
+- 下一步：T17（本地工具 datetime / kb，§19.7）。
+
+## T17 已完成（2026-10-18）—— 本地工具 datetime + kb
+- 新增 `kbqa/tools/datetime_tool.py`（`get_datetime` 模块级 Tool）与 `kbqa/tools/kb_tool.py`（`build_kb_tool(pipeline, max_chars)` 工厂）。
+- `kbqa/config.py` / `.env.example` 新增 `AGENT_TOOL_RESULT_MAX_CHARS=2000`（§19.4 配置增量，T17 截断需要）。
+- 实测：
+  - `get_datetime` 默认 → 2026-10-18 / 星期日 / 11:05:02 / 今天（+0 天）；tomorrow → 2026-10-19 / 星期一 / 明天（+1 天）
+  - 临时索引 1 篇文档（6 chunk）→ `search_knowledge_base` top_n=2 → `[1] 文件#0000（0.9765）`、`[2] #0001（0.3678）`，结果 674 字 ≤ 2000
+  - 空库 → `未检索到相关资料。`（9 字），无异常
+  - 两工具日志均含参数、成功/失败、命中数/结果长度、耗时
+- 设计要点：
+  - `get_datetime` 参数非法（日期/时区）返回**解释文本**而非异常，让模型自己纠正；真正运行时异常仍交给 T18 loop。
+  - 时间用 `zoneinfo.ZoneInfo`（IANA），默认本机时区；未引入新依赖（Windows 若无 tzdata，则命名时区不可用，本机时区可用）。
+  - `build_kb_tool` 用工厂做依赖注入；内部只调 `pipeline.retrieve`，不重写检索。
+  - 返回编号顺序 = `used` 顺序（与 `format_context` 一致）；单条片段截 300 字，总结果截 `AGENT_TOOL_RESULT_MAX_CHARS`。
+  - 空库/无命中返回文本，不抛异常。
+- 教学：新增课程 `lessons/0020-how-to-write-t17.html`；术语表新增 `IANA 时区 / ZoneInfo`；资源清单补 Python zoneinfo。
+- 下一步：T18（agent loop，§19.8）。
+
+## T18 已完成（2026-10-18）—— agent loop
+- 新增 `kbqa/agent.py`（`AgentRunner` 手写 loop）；`kbqa/models.py` 新增 `AgentStep` / `AgentRun`；`kbqa/config.py` / `.env.example` 新增 `AGENT_MAX_STEPS=5`。
+- 实测：
+  - 「今天是几号、星期几？」→ 2 轮 / 1 步 / 调 `get_datetime` / `final_answer`；答案「2026年10月18日，星期日」，总耗时 1927ms
+  - 模型每轮都要求再调一次 → 停在 `max_steps=5`，执行 4 步后停止，不抛异常，返回兜底文本
+  - 工具必抛异常 → 该步 `ok=False`，`result_text=工具执行失败：故意失败`，循环继续并给答案
+  - 3000 字工具结果 → 截到 2000 字，严格 ≤ `AGENT_TOOL_RESULT_MAX_CHARS`
+  - 日志四类打点齐全（开始 / 每轮 / 每次工具 / 结束）
+- 设计要点：
+  - 外层 `while` 管轮数，内层 `for` 管一轮多个 tool_calls，工具选择走 `registry.get`（不用 if-else）。
+  - 最后一轮不再执行工具（没有下一轮消费结果），直接 `stop_reason="max_steps"`。
+  - 参数 JSON 解析失败：不执行 handler，记 `{"_raw": ...}` + `ok=False`，仍回填 tool 消息。
+  - 工具异常：转成错误文本，`ok=False`，循环继续。
+  - 同一工具+同参数连续 ≥2 次：追加提示文本 + `WARNING`；真正兜底仍是 max_steps。
+  - 截断严格：`text[:limit-3] + "..."`；顺带修复了 T17 `kb_tool._truncate` 的同类边界（可能超 3 字符）。
+  - skill 尚未实现：`run(skill=...)` 非 None 时直接 `ValueError`，T26 再替换。
+- 教学：新增课程 `lessons/0021-how-to-write-t18.html`；术语表新增 `agent loop` / `stop_reason`。
+- 下一步：T19（agent API，§19.9）。
+
+## T19 已完成（2026-10-18）—— agent API
+- `api/schemas.py` 新增 `AgentChatRequest` / `AgentStepOut` / `AgentRunOut` / `SkillOut` 与 `to_agent_run_out`。
+- `api/routes.py` 新增 `GET /api/agent/skills`（T26 前返回 `[]`）与 `POST /api/agent/chat`；skill 不存在映射为 400 `skill_not_found`。
+- `api/main.py` 装配 `ToolRegistry`（`get_datetime` + `search_knowledge_base`）与 `AgentRunner`，挂到 `app.state.agent`；`llm` 实例同时注入 pipeline 与 agent。
+- 实测（TestClient）：
+  - `POST /api/agent/chat {"question":"今天几号？"}` → 200，字段齐全，`final_answer`，调用 `get_datetime`
+  - `skill="not-exist"` → 400 `skill_not_found`
+  - 工具全部失败 → 200，`steps[0].ok=false`，最终仍有答案
+  - `max_steps=2` → 200，`stop_reason=max_steps`，`rounds=2`
+  - 回归：`/api/health` 200；`/api/qa` 200（真实检索 + 生成）
+- 设计要点：工具失败 / max_steps 都**不是 HTTP 错误**；对外 schema 与内部 DTO 分两层；路由层只解析请求、调 `AgentRunner.run`、转换响应，不写编排。
+- 教学：新增课程 `lessons/0022-how-to-write-t19.html`；术语表新增 `TestClient`；资源清单补 FastAPI 测试文档。
+- 下一步：T20（前端工具调用轨迹，§19.10）。
+
+## T20 已完成（2026-10-18）—— 前端工具调用轨迹
+- `web/src/api.ts` 新增 `AgentStep` / `AgentRun` / `SkillInfo`、`agentSkills()`、`agentChat()`。
+- 新增 `AgentPanel.vue`、`ToolTrace.vue`；`App.vue` 持有 `agentResult` / `skills`，统一发请求。
+- 实测（浏览器 http://localhost:8010）：
+  - 「5. Agent 对话」出现，Skill 下拉默认「自动」，原有上传/文档列表/提问面板未受影响
+  - 提问「今天几号？」→ 2 轮 · 1 次工具 · 2035 ms；答案「2026年10月18日，星期日」
+  - 工具轨迹 `#1 get_datetime 成功 0 ms`，绿色徽章，展开可见参数与结果
+  - `npm run type-check` / `npm run build` 均通过
+- 设计要点：网络调用只在 `App.vue`；`AgentPanel` / `ToolTrace` 只发事件/渲染 props；失败步骤默认展开并标红；skill 下拉空列表时只剩「自动」。
+- 教学：新增课程 `lessons/0023-how-to-write-t20.html`；资源清单补 Vue 组件基础。
+- 下一步：T21（对照实验：固定链路 vs Agent）。
+
+## T21 已完成（2026-10-18）—— 固定链路 vs Agent 对照
+- 新增 `eval/agent_compare.py`，一条命令对同一批问题双跑，输出 `eval/agent_compare.md`（逐题对照 + 本次案例 + 自动统计）。
+- 实测（3 题）：
+  - 实时题「今天几号，星期几？」：固定链路检索后拒答；Agent 调 `get_datetime`，正确回答 2026-10-18 星期日
+  - 事实题「豆豆的疫苗本编号」：固定链路正确回答 `VX-2021-0314-77 [1]`；Agent **未调工具**，以隐私为由拒答（真实反例）
+  - 事实题「2025 年旅行」：两版都正确；Agent 调 `search_knowledge_base`，但答案未带 [n] 引用
+  - Agent 调用工具 2/3；平均耗时 固定 2744ms / Agent 4219ms
+- 结论：Agent 的价值是"选择"（实时题），风险也是"选择"（事实题不检索）；耗时不是公平指标，要结合轮数与工具次数看。
+- 教学：新增课程 `lessons/0024-how-to-write-t21.html`。
+- 下一步：T22（百度搜索工具，批次 B，mock-first）。
+
+## T22 已完成（2026-10-18）—— 百度搜索工具（mock-first）
+- 新增 `kbqa/tools/web_search.py`（工厂 `build_web_search_tool(settings)`）；`config.py` / `.env.example` 新增 `WEB_SEARCH_API_KEY` / `WEB_SEARCH_ENDPOINT`。
+- 契约：query 必填、count 1–5、每条标题+URL+摘要（≤200 字）、最多 5 条、超时 10s、失败返回文本不抛异常。
+- 实测：mock 3 条（514 字，带 `[mock]`）；错误 endpoint → `web_search 调用失败：…`（2750ms）；日志无 Key。
+- ⚠️ **真实联调：未联调**（无 Key / endpoint）。接口尚未定稿，采用可配置 GET + Bearer 的最小约定。
+- 教学：新增课程 `lessons/0025-how-to-write-t22.html`。
+
+## T23 已完成（2026-10-18）—— 天气工具（mock-first）
+- 新增 `kbqa/tools/weather.py`（工厂 `build_weather_tool(settings)`）；`config.py` / `.env.example` 新增 `WEATHER_API_KEY` / `WEATHER_ENDPOINT`。
+- 契约：city 必填（城市名）、days 1–7、返回城市/日期/天气/温度、超时 10s、错误返回文本。
+- 实测：北京 2 天 → 城市/日期/天气/温度齐全（带 mock 标记）；不存在的城市 → `未找到城市：…`；错误 endpoint → `get_weather 调用失败：…`（2566ms）。
+- ⚠️ **真实联调：未联调**（无 Key / endpoint）。
+- 教学：新增课程 `lessons/0026-how-to-write-t23.html`。
+- 下一步：T24（MCP server：markdown 写入）。
+
+## T24 已完成（2026-10-18）—— MCP server：markdown 写入
+- 新增 `mcp_servers/md_writer/server.py`（官方 SDK `MCPServer`，stdio 传输）、`requirements-mcp.txt`（`mcp>=2,<3`）、`data/exports/.gitkeep`；`.gitignore` 忽略导出内容。
+- 安全边界：目录由服务端固定；拒绝绝对路径 / 盘符 / `..` / 目录成分；写入前 `resolve().relative_to(EXPORT_DIR)` 双保险；content 上限 200,000 字符。
+- 实测：`tools/list` → `["write_markdown"]`；写入 `hello.md` 内容一致；`../../evil.md` 被拒绝且目录外无文件。
+- ⚠️ 环境安装：`mcp 2.3.0`（`FastMCP` 在 2.x 改名为 `MCPServer`，API 基本一致）。
+- 教学：新增课程 `lessons/0027-how-to-write-t24.html`。
+
+## T25 已完成（2026-10-18）—— MCP client：工具并入 registry
+- 新增 `kbqa/mcp_client.py`：`MCP_ENABLED=false` 时直接返回且**不 import mcp**；启用时 `tools/list` → 包装成 `Tool`（名称前缀 `server.tool`）→ 注册进同一个 registry。
+- `config.py` / `.env.example` 新增 `MCP_ENABLED` / `MCP_SERVERS` / `EXPORT_DIR`；`main.py` 装配时调用 `register_mcp_tools`。
+- 失败隔离：server 命令写错只记 WARNING，其余工具仍可用；每次 `tools/call` 开一个 stdio 会话（实测 3–5s，demo 取舍）。
+- 实测：
+  - `MCP_ENABLED=false` → 只有本地工具，`mcp` 未被 import
+  - 启用 → registry 出现 `md_writer.write_markdown`，写文件成功
+  - 错误 server → 只剩本地工具，应用不崩
+  - Agent 脚本化调用 MCP 工具 → 1 步成功，`trace.md` 落盘
+- 教学：新增课程 `lessons/0028-how-to-write-t25.html`。
+- 下一步：T26（Skill 机制）。
+
+## T26 已完成（2026-10-18）—— Skill 机制
+- 新增 `kbqa/skills.py`（`Skill` / `SkillLoader` / `LOAD_SKILL_SCHEMA`）、`skills/daily-brief/SKILL.md`、`skills/kb-research/SKILL.md`。
+- `agent.py` 支持两种触发：显式 `skill=name` 启动即收窄工具；自动模式注入 skill 清单 + `load_skill`，加载后正文进 system prompt、工具集收窄。
+- `config.py` / `.env.example` 新增 `SKILLS_DIR` / `SKILL_AUTO_SELECT`；`main.py` 装配 `SkillLoader`；`GET /api/agent/skills` 返回真实清单。
+- 实测：
+  - 加载 2 个 skill：`daily-brief` / `kb-research`
+  - 显式 `daily-brief`：首轮工具 = `get_datetime / search_knowledge_base / get_weather`，无 `load_skill`
+  - 自动：首轮含 `load_skill`；第二轮工具收窄为 3 个；`run.skill=daily-brief`
+  - `SKILL_AUTO_SELECT=false`：无 `load_skill`、system 无 skill 清单
+  - 未知 skill：runner `ValueError`；API 400 `skill_not_found`
+  - `GET /api/agent/skills` → 200，返回两个 name + description
+- 教学：新增课程 `lessons/0029-how-to-write-t26.html`；术语表新增 `skill / 渐进披露`。
+- 下一步：T27（流式输出）。
+
+## T27 已完成（2026-10-18）—— 流式输出（SSE）
+- `AgentRunner.run` 新增可选 `on_event` 回调，发出 step_start / tool_call / tool_result；`api/routes.py` 新增 `POST /api/agent/chat/stream`（线程 + 队列 + StreamingResponse）。
+- 前端 `api.ts` 新增 `agentChatStream`（ReadableStream 解析 SSE）；`AgentPanel` 加「流式输出」开关；`App.vue` 按事件增量更新答案与轨迹。
+- 事件序列实测：step_start → tool_call → tool_result → step_start → token ×3 → done。
+- ⚠️ **诚实边界**：`token` 是把最终答案按 8 字分片发出，不是模型原生 token 流；真正的原生流需要改 LLM 层。
+- 浏览器实测：流式默认勾选；答案与 get_datetime 轨迹正常。
+- 教学：新增课程 `lessons/0030-how-to-write-t27.html`。
+- 下一步：T28（LangGraph 版 loop）。
+
+## T28 已完成（2026-10-18）—— LangGraph 版 agent loop
+- 新增 `kbqa/agent_graph.py`（`GraphAgentRunner` 继承 `AgentRunner`，复用 skill / 工具执行 / 截断 / 日志）；`agent.py` 新增 `AgentEngine` 协议与 `create_agent_runner`；`config.py` / `.env.example` 新增 `AGENT_ENGINE`；`requirements-langgraph.txt`。
+- 图结构：llm 节点 → 条件边（pending_calls 是否为空）→ tools 节点 → 回 llm；`recursion_limit = max_steps*2+4`。
+- 实测：
+  - 真实问日期：2 轮 / 1 步 / `get_datetime` / final_answer
+  - max_steps=3：停在 3 轮 / 2 步，不抛异常
+  - 工具异常：ok=False，继续到最终答案
+  - 3000 字 → 2000 字
+  - 两版同脚本：stop_reason / 步数 / 轮数 / 工具名一致
+  - skill 收窄在 LangGraph 版同样生效
+  - handwritten 模式 `langgraph` 未被 import（实测 False）
+- 教学：新增课程 `lessons/0031-how-to-write-t28.html`。
+- 下一步：T29（双引擎对照）。
+
+## T29 已完成（2026-10-18）—— 双引擎对照实验
+- 新增 `eval/agent_engine_compare.py`，双跑手写 vs LangGraph，输出 `eval/agent_engine_compare.md`。
+- 实测（3 题）：
+  - 疫苗题：手写未调工具（回答缺背景）；LangGraph 调 `search_knowledge_base` 并答出 `VX-2021-0314-77`（模型采样差异）
+  - 日期题：两版都调 `get_datetime`，答案一致
+  - 旅行题：两版都调检索，答案措辞不同；耗时 6466ms vs 17297ms
+  - 确定性边界 max_steps=3：两版完全一致（rounds=3 / steps=2 / tool_calls=2）
+  - 代码量：agent.py 538 行 vs agent_graph.py 264 行；LangGraph 为可选依赖
+- 结论：两版控制流被刻意设计为等价；对话差异主要来自模型采样；框架把循环声明化，也引入依赖与排查成本。学习阶段选手写，复杂流程选图。
+- 教学：新增课程 `lessons/0032-how-to-write-t29.html`；术语表新增 `StateGraph / 节点 / 条件边`；资源清单补 LangGraph。
+- 🎉 T15–T29 全部完成（T22/T23 真实联调仍为「未联调」，已如实记录）。
+
+## 概念补课（2026-10-18）：工厂参数注入怎么举一反三
+- 触发：用户追问 `build_kb_tool(pipeline, max_chars)` 的"工厂注入参数"是什么意思、怎么迁移。
+- 已扩成独立课程 **`lessons/0033-factory-injection-pattern.html`**，不重复 0013 的基础 DI，重点在"迁移方法"：
+  - 通用模板：`build_X(dep_a, dep_b, config) -> X`，参数是注入点、闭包固定依赖、返回统一接口成品。
+  - 四步迁移法：① 识别依赖 → ② 选注入点（函数工厂 / 构造函数 / app.state / 环境变量 / 适配器工厂）→ ③ 在组合根装配 → ④ 用假实现验证。
+  - 判断表：外部 IO / 测试替换 / 共享实例 / 有第二实现 → 该注入；纯函数、标准库小工具、无变化点 → 不该注入。
+  - 项目里的五种同构形态：闭包工厂、类构造注入、适配器工厂、应用级单例、前端 props/emits。
+  - 三种反面写法：模块级全局、handler 内部 new、工厂参数膨胀（应收敛成 Settings / 上下文）。
+  - 练习 A–D：翻译工具、订单通知、测试 max_steps、判断该不该抽。
+- 术语表新增：**组合根（composition root）**、**闭包工厂**。
+- 教学要点：讲模式时用"四步 + 判断表 + 同构形态"比只给定义更可迁移；同时强调"别过度注入"。

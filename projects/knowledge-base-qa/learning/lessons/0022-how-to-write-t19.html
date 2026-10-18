@@ -1,0 +1,206 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>课程 0022 · 把 loop 接上 HTTP：拆解 T19</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+<div class="wrap">
+
+  <p class="eyebrow">课程 0022 · Agent 化实战 · 对应任务 T19</p>
+  <h1>把 loop 接上 HTTP</h1>
+  <p class="lede">T18 的 <code>AgentRunner</code> 只能在 Python 里跑。T19 只做一件事：给它开两个 HTTP 入口，并把内部 DTO 翻译成对外 schema。**路由层不编排、不执行工具、不重写循环。**</p>
+
+  <div class="win">
+    <strong>学完你能做到：</strong>看懂 agent 的请求/响应字段；说清「工具失败」「max_steps」为什么都不是 HTTP 错误；理解 <code>app.state</code> 装配与 TestClient 验证；并能用 curl 跑通完整链路。
+    <br><span class="muted">配套：<a href="../reference/python-concepts-glossary.html">术语表</a> · 前置 <a href="0021-how-to-write-t18.html">课程 0021</a></span>
+  </div>
+
+  <h2>一、T19 增加了什么</h2>
+  <table>
+    <thead><tr><th>文件</th><th>改动</th></tr></thead>
+    <tbody>
+      <tr><td><code>api/schemas.py</code></td><td><code>AgentChatRequest</code> / <code>AgentStepOut</code> / <code>AgentRunOut</code> / <code>SkillOut</code></td></tr>
+      <tr><td><code>api/routes.py</code></td><td><code>GET /api/agent/skills</code>、<code>POST /api/agent/chat</code></td></tr>
+      <tr><td><code>api/main.py</code></td><td>装配 <code>ToolRegistry</code> + <code>AgentRunner</code>，挂到 <code>app.state.agent</code></td></tr>
+    </tbody>
+  </table>
+  <p><code>chat/stream</code> 留给 T27，本次不碰。</p>
+
+  <h2>二、请求与响应</h2>
+  <pre><code>POST /api/agent/chat
+{
+  "question": "今天几号？顺便看看知识库里有没有相关约定",
+  "skill": null,
+  "history": []
+}</code></pre>
+
+  <pre><code>200
+{
+  "answer": "...",
+  "skill": null,
+  "stop_reason": "final_answer",
+  "steps": [
+    { "index": 0, "tool": "get_datetime", "arguments": {},
+      "result_text": "...", "ok": true, "elapsed_ms": 3 }
+  ],
+  "tool_calls_count": 1,
+  "rounds": 2,
+  "latency_ms": 1840
+}</code></pre>
+
+  <div class="note">
+    <span class="label">为什么还要转一层 Out</span>
+    <code>AgentRun</code> 是内部 DTO；<code>AgentRunOut</code> 是对外契约。分两层的好处：内部字段改名不会悄悄改变 API；对外字段也能独立演进。
+    这和 T10 的 <code>QAResult → QAResultOut</code> 是同一套做法。
+  </div>
+
+  <h2>三、三类结果的 HTTP 语义</h2>
+  <table>
+    <thead><tr><th>情况</th><th>HTTP</th><th>响应</th></tr></thead>
+    <tbody>
+      <tr><td>正常结束</td><td>200</td><td><code>stop_reason="final_answer"</code></td></tr>
+      <tr><td>工具失败</td><td><strong>200</strong></td><td><code>steps[].ok=false</code>，循环继续</td></tr>
+      <tr><td>达到步数上限</td><td><strong>200</strong></td><td><code>stop_reason="max_steps"</code></td></tr>
+      <tr><td>skill 不存在</td><td>400</td><td><code>{"error":{"code":"skill_not_found",...}}</code></td></tr>
+    </tbody>
+  </table>
+
+  <div class="note">
+    <span class="label">核心判断</span>
+    <strong>HTTP 错误只表示"这次请求没法处理"。</strong>工具失败是 agent 运行过程中的正常分支，最终仍可能给出答案，所以是 200；模型没收敛也是 200，只是 <code>stop_reason</code> 告诉你它没给出最终答案。
+    <br>只有"请求本身不合法"（如 skill 不存在）才是 4xx。
+  </div>
+
+  <h2>四、skill_not_found 怎么来的</h2>
+  <pre><code>try:
+    run = _agent(request).run(payload.question, payload.skill, payload.history)
+except ValueError as exc:
+    if payload.skill is not None:
+        raise ApiError(400, "skill_not_found", f"skill 不存在：{payload.skill}") from exc
+    raise</code></pre>
+  <p>T18 的 <code>AgentRunner.run</code> 在 <code>skill</code> 非 None 时主动 <code>ValueError</code>（T26 之前没有 skill）。路由层把它翻译成 400；其他 <code>ValueError</code> 仍走全局的 <code>invalid_request</code>。</p>
+
+  <h2>五、装配：app.state.agent</h2>
+  <pre><code>registry = ToolRegistry()
+registry.register(get_datetime)
+registry.register(build_kb_tool(pipeline, settings.agent_tool_result_max_chars))
+agent = AgentRunner(settings, registry, llm)
+
+app.state.agent = agent</code></pre>
+  <p>为什么挂在 <code>app.state</code>：</p>
+  <ul>
+    <li>每个应用实例一份，测试可替换；</li>
+    <li>路由通过 <code>request.app.state.agent</code> 取用，不 import 具体实例；</li>
+    <li>知识库工具复用同一个 <code>pipeline</code>（也就是同一个 <code>store</code>），避免"索引了却查不到"。</li>
+  </ul>
+
+  <h2>六、路由层要薄</h2>
+  <p>这个路由做了三件事，没有第四件：</p>
+  <ol>
+    <li>解析请求（pydantic）；</li>
+    <li>调用 <code>AgentRunner.run</code>；</li>
+    <li>把结果转成响应模型。</li>
+  </ol>
+  <p>它<strong>不</strong>决定调哪个工具、<strong>不</strong>执行工具、<strong>不</strong>写循环。判断标准：删掉 FastAPI，<code>kbqa/agent.py</code> 仍然能独立运行。</p>
+
+  <h2>七、实测数据</h2>
+  <table>
+    <thead><tr><th>验收点</th><th>实测</th></tr></thead>
+    <tbody>
+      <tr><td><code>POST /api/agent/chat</code></td><td>✅ 200，含 answer / skill / steps / stop_reason / tool_calls_count / rounds / latency_ms；<code>final_answer</code>，调用 <code>get_datetime</code></td></tr>
+      <tr><td>不存在的 skill</td><td>✅ 400 <code>skill_not_found</code></td></tr>
+      <tr><td>工具全部失败</td><td>✅ 200，<code>steps[0].ok=false</code>，最终仍给答案</td></tr>
+      <tr><td>触发 max_steps</td><td>✅ 200，<code>stop_reason=max_steps</code>，<code>rounds=2</code></td></tr>
+      <tr><td>回归</td><td>✅ <code>/api/health</code> 200；<code>/api/qa</code> 200（真实检索+生成）</td></tr>
+      <tr><td><code>GET /api/agent/skills</code></td><td>✅ 200 <code>[]</code>（T26 之前无 skill）</td></tr>
+    </tbody>
+  </table>
+
+  <h2>八、亲手做一遍</h2>
+
+  <div class="note">
+    <span class="label">练习 A · curl 跑通</span>
+    启动 <code>uvicorn api.main:app --port 8010</code>，然后：
+    <pre><code>curl -s http://127.0.0.1:8010/api/agent/chat ^
+  -H "Content-Type: application/json" ^
+  -d "{\"question\":\"今天几号？\"}"</code></pre>
+    对照响应，找到 <code>steps</code> 里的工具名与耗时。
+  </div>
+
+  <div class="note">
+    <span class="label">练习 B · 制造 skill_not_found</span>
+    请求体加上 <code>"skill": "not-exist"</code>，确认返回 400 与统一错误信封。
+  </div>
+
+  <div class="note">
+    <span class="label">练习 C · 看 HTTP 状态码</span>
+    把某个工具改成必抛异常（或在代码里临时 raise），观察接口仍是 <strong>200</strong>，但 <code>steps[].ok=false</code>。想清楚：前端应该怎么展示这种"成功响应里的失败步骤"？
+  </div>
+
+  <div class="note">
+    <span class="label">练习 D · TestClient</span>
+    用 <code>fastapi.testclient.TestClient</code> 替换 <code>app.state.agent</code> 为假 runner，断言响应字段。体会为什么把依赖挂在 <code>app.state</code> 让测试更容易。
+  </div>
+
+  <h2>九、自测（凭记忆答）</h2>
+
+  <div class="quiz" data-answer="a">
+    <p class="q">1. 工具执行失败时，接口应该返回什么状态码？</p>
+    <button class="quiz-option" data-key="a">200，失败体现在 steps[].ok=false</button>
+    <button class="quiz-option" data-key="b">500，因为工具抛了异常</button>
+    <button class="quiz-option" data-key="c">502，因为属于上游失败</button>
+    <button class="quiz-option" data-key="d">400，因为参数一定有问题</button>
+    <p class="feedback"
+       data-correct="对。工具失败是运行分支，模型仍可能给出答案，所以是 200。"
+       data-wrong="再想想：HTTP 错误只表示请求没法处理，工具失败不是。"></p>
+  </div>
+
+  <div class="quiz" data-answer="a">
+    <p class="q">2. 为什么响应要多一层 <code>AgentRunOut</code>？</p>
+    <button class="quiz-option" data-key="a">把内部 DTO 与对外 API 形状解耦</button>
+    <button class="quiz-option" data-key="b">因为 FastAPI 不能直接序列化 dataclass</button>
+    <button class="quiz-option" data-key="c">为了让响应体积变得更小</button>
+    <button class="quiz-option" data-key="d">因为 AgentRun 字段太少</button>
+    <p class="feedback"
+       data-correct="对。内部字段改名不会悄悄改变 API，兼容性改动集中在 schemas.py。"
+       data-wrong="再想想：这是分层与契约问题，不是框架限制。"></p>
+  </div>
+
+  <div class="quiz" data-answer="a">
+    <p class="q">3. <code>max_steps</code> 应该返回什么？</p>
+    <button class="quiz-option" data-key="a">200 + stop_reason="max_steps"</button>
+    <button class="quiz-option" data-key="b">504，因为循环超时</button>
+    <button class="quiz-option" data-key="c">500，因为模型没有收敛</button>
+    <button class="quiz-option" data-key="d">400，因为问题太难</button>
+    <p class="feedback"
+       data-correct="对。没收敛不是 HTTP 错误，用 stop_reason 告诉调用方。"
+       data-wrong="再想想：请求本身是合法的，只是 agent 主动刹车。"></p>
+  </div>
+
+  <div class="quiz" data-answer="a">
+    <p class="q">4. 路由层为什么不应该写编排逻辑？</p>
+    <button class="quiz-option" data-key="a">核心 loop 要能脱离 FastAPI 独立运行与测试</button>
+    <button class="quiz-option" data-key="b">因为 FastAPI 不支持同步函数</button>
+    <button class="quiz-option" data-key="c">因为路由里不能用 if 语句</button>
+    <button class="quiz-option" data-key="d">因为编排逻辑会显著增加响应体积</button>
+    <p class="feedback"
+       data-correct="对。路由只是翻译官；删掉框架，kbqa/agent.py 仍应完整可用。"
+       data-wrong="再想想：这是分层原则，不是语言或框架限制。"></p>
+  </div>
+
+  <h2>十、想深入时读这个</h2>
+  <p><strong>FastAPI 测试：</strong><a href="https://fastapi.tiangolo.com/zh/tutorial/testing/">FastAPI 官方教程 · 测试</a>（官方中文）——<code>TestClient</code> 的用法与本课验收方式一致。</p>
+  <p><strong>本课代码：</strong><a href="../../api/routes.py">api/routes.py</a> · <a href="../../api/schemas.py">api/schemas.py</a> · <a href="../../api/main.py">api/main.py</a></p>
+  <p class="muted">完整资源见 <a href="../RESOURCES.md">RESOURCES.md</a>。</p>
+
+  <div class="foot">
+    不清楚就直接问，比如"history 为什么要放在 user 前面""什么时候该返回 422 而不是 400"。我是你的老师，问多基础都可以。
+  </div>
+
+</div>
+<script src="../assets/quiz.js"></script>
+</body>
+</html>

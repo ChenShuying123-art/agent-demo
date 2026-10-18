@@ -1,0 +1,140 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>课程 0030 · 让回答一点点出现：拆解 T27</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+<div class="wrap">
+
+  <p class="eyebrow">课程 0030 · Agent 化实战 · 对应任务 T27</p>
+  <h1>让回答一点点出现</h1>
+  <p class="lede">普通 HTTP 要等整次 agent 跑完才返回；SSE 可以在过程里持续推事件。T27 用一条 <code>text/event-stream</code> 连接把 <code>step_start / tool_call / tool_result / token / done</code> 逐个发给前端。</p>
+
+  <div class="win">
+    <strong>学完你能做到：</strong>说清 SSE 与普通 JSON 响应的区别；理解"后台线程 + 队列 → 生成器"的桥接方式；并知道本课的 token 流是"答案分片"，不是模型原生 token 流。
+    <br><span class="muted">配套：<a href="../reference/python-concepts-glossary.html">术语表</a> · 前置 <a href="0021-how-to-write-t18.html">课程 0021</a></span>
+  </div>
+
+  <h2>一、事件格式</h2>
+  <pre><code>event: tool_result
+data: {"event":"tool_result","index":0,"tool":"get_datetime","ok":true,...}
+
+event: token
+data: {"event":"token","text":"今天是 **20"}
+</code></pre>
+  <p>每条事件两行：<code>event:</code> 类型 + <code>data:</code> JSON，块之间空一行。前端按 <code>\n\n</code> 切块即可。</p>
+
+  <h2>二、后端：线程 + 队列 + 生成器</h2>
+  <div class="diagram">
+    <div class="dbox"><strong>worker 线程</strong><span>runner.run(on_event=queue.put)</span></div>
+    <div class="darrow">↓</div>
+    <div class="dbox"><strong>queue.Queue</strong><span>事件缓冲</span></div>
+    <div class="darrow">↓</div>
+    <div class="dbox lead"><strong>StreamingResponse</strong><span>逐个 yield "event/data"</span></div>
+    <div class="dcap">图 1 · 同步 loop 不改，外面包一层异步输出</div>
+  </div>
+  <p>为什么不直接做成 async：`AgentRunner.run` 是同步的（工具也是同步的）。用一个后台线程跑它，主线程只负责把队列里的事件写出去，改动最小。</p>
+
+  <h2>三、token 事件的真相</h2>
+  <div class="note">
+    <span class="label">诚实说明</span>
+    本课的 <code>token</code> 是把<strong>最终答案按 8 字分片</strong>发出，用于前端逐字渲染；模型本身仍是一次性返回。真正的原生 token 流需要改 LLM 层（stream=True + 解析 delta），不在本批范围。<strong>报告与课程里都要写清楚这一点。</strong>
+  </div>
+
+  <h2>四、前端：ReadableStream 解析</h2>
+  <pre><code>const reader = resp.body.getReader()
+const decoder = new TextDecoder()
+let buffer = ''
+while (true) {
+  const { done, value } = await reader.read()
+  if (done) break
+  buffer += decoder.decode(value, { stream: true })
+  const blocks = buffer.split('\n\n')
+  buffer = blocks.pop() ?? ''
+  for (const block of blocks) {
+    const line = block.split('\n').find(l =&gt; l.startsWith('data: '))
+    if (line) onEvent(JSON.parse(line.slice(6)))
+  }
+}</code></pre>
+  <p>两个易错点：① 必须保留最后一段不完整的 <code>buffer</code>；② 解码用 <code>{ stream: true }</code>，否则中文跨块会乱码。</p>
+
+  <h2>五、前端如何增量渲染</h2>
+  <ul>
+    <li><code>tool_result</code> → push 进 <code>steps</code>，轨迹列表立刻出现；</li>
+    <li><code>token</code> → <code>answer += text</code>，文字逐渐出现；</li>
+    <li><code>done</code> → 用最终值覆盖（包含 skill / stop_reason / 耗时）。</li>
+  </ul>
+  <p>注意直接把对象赋给 <code>ref</code> 后，要通过 <code>agentResult.value</code>（响应式代理）修改字段；改原始对象不会触发重渲染。</p>
+
+  <h2>六、实测数据</h2>
+  <table>
+    <thead><tr><th>验收点</th><th>实测</th></tr></thead>
+    <tbody>
+      <tr><td><code>curl</code> 看到分片事件</td><td>✅ step_start → tool_call → tool_result → step_start → 3 个 token → done</td></tr>
+      <tr><td>事件内容</td><td>✅ get_datetime 成功；答案「今天是 **2026年10月18日，星期日**。」</td></tr>
+      <tr><td>浏览器</td><td>✅ 流式开关默认勾选；答案与轨迹正常；Skill 下拉含 daily-brief / kb-research</td></tr>
+      <tr><td>非流式接口</td><td>✅ <code>/api/agent/chat</code> 未改动</td></tr>
+    </tbody>
+  </table>
+
+  <h2>七、亲手做一遍</h2>
+  <div class="note">
+    <span class="label">练习 A · 用 curl 数事件</span>
+    用 <code>curl -N</code> 请求流式接口，数一数一次日期问题会发多少条 token 事件。
+  </div>
+  <div class="note">
+    <span class="label">练习 B · 断线</span>
+    在浏览器里发起请求后立刻关闭标签页，观察服务端 worker 是否继续跑完（daemon 线程）。
+  </div>
+  <div class="note">
+    <span class="label">练习 C · 设计题</span>
+    如果要做真正的模型原生 token 流，需要改哪几层？先列出顺序，再动手。
+  </div>
+
+  <h2>八、自测（凭记忆答）</h2>
+  <div class="quiz" data-answer="a">
+    <p class="q">1. SSE 与普通 JSON 响应的核心区别？</p>
+    <button class="quiz-option" data-key="a">SSE 在连接上持续推多条事件，普通响应一次性返回</button>
+    <button class="quiz-option" data-key="b">SSE 只能传二进制</button>
+    <button class="quiz-option" data-key="c">SSE 不需要 HTTP</button>
+    <button class="quiz-option" data-key="d">SSE 只能由浏览器发起</button>
+    <p class="feedback"
+       data-correct="对。SSE 是一条长连接上的事件流。"
+       data-wrong="再想想：它仍是 HTTP，只是响应体持续输出。"></p>
+  </div>
+  <div class="quiz" data-answer="a">
+    <p class="q">2. 为什么用后台线程跑 agent loop？</p>
+    <button class="quiz-option" data-key="a">loop 是同步的，用线程桥接到流式响应改动最小</button>
+    <button class="quiz-option" data-key="b">线程能让模型回答更快</button>
+    <button class="quiz-option" data-key="c">FastAPI 不允许同步函数</button>
+    <button class="quiz-option" data-key="d">线程可以绕过工具权限</button>
+    <p class="feedback"
+       data-correct="对。同步 loop + 队列 + StreamingResponse 是最小改动。"
+       data-wrong="再想想：这不是性能优化，是异步与同步的桥接。"></p>
+  </div>
+  <div class="quiz" data-answer="a">
+    <p class="q">3. 本课的 token 事件是什么？</p>
+    <button class="quiz-option" data-key="a">最终答案按 8 字分片，不是模型原生 token 流</button>
+    <button class="quiz-option" data-key="b">模型每个 token 的真实增量</button>
+    <button class="quiz-option" data-key="c">工具结果的二进制分片</button>
+    <button class="quiz-option" data-key="d">SSE 协议自带的心跳</button>
+    <p class="feedback"
+       data-correct="对。诚实标注边界，比假装原生流更重要。"
+       data-wrong="再想想：原生 token 流需要改 LLM 层的 stream 解析。"></p>
+  </div>
+
+  <h2>九、想深入时读这个</h2>
+  <p><strong>MDN：</strong><a href="https://developer.mozilla.org/zh-CN/docs/Web/API/Server-sent_events/Using_server-sent_events">使用服务器发送事件</a>（官方中文）——SSE 的格式与浏览器 API。</p>
+  <p><strong>本课代码：</strong><a href="../../api/routes.py">api/routes.py</a> · <a href="../../kbqa/agent.py">kbqa/agent.py</a> · <a href="../../web/src/api.ts">web/src/api.ts</a></p>
+
+  <div class="foot">
+    不清楚就直接问，比如"SSE 和 WebSocket 怎么选""断线重连要不要做"。我是你的老师，问多基础都可以。
+  </div>
+
+</div>
+<script src="../assets/quiz.js"></script>
+</body>
+</html>

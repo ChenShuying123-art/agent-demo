@@ -1,0 +1,142 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>课程 0029 · 给 agent 一本工作手册：拆解 T26</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+<div class="wrap">
+
+  <p class="eyebrow">课程 0029 · Agent 化实战 · 对应任务 T26</p>
+  <h1>给 agent 一本工作手册</h1>
+  <p class="lede">skill = <strong>一段提示词正文 + 一组允许使用的工具</strong>。它不是新能力，而是把"某类任务该怎么做"写成可加载的手册。T26 要落地两件事：用户显式指定，以及模型经 <code>load_skill</code> 自动选择。</p>
+
+  <div class="win">
+    <strong>学完你能做到：</strong>理解渐进披露（先给目录、再给正文）；说清"收窄工具集"如何防止越权；并知道显式与自动两条触发路径分别怎么走。
+    <br><span class="muted">配套：<a href="../reference/python-concepts-glossary.html">术语表</a> · 前置 <a href="0021-how-to-write-t18.html">课程 0021</a></span>
+  </div>
+
+  <h2>一、一个 SKILL.md 长什么样</h2>
+  <pre><code>---
+name: daily-brief
+description: 当用户想了解"今天该知道什么"时使用：日期 + 天气 + 知识库里的相关约定
+tools: [get_datetime, get_weather, search_knowledge_base]
+---
+
+回答流程：
+1. 先用 get_datetime 获取日期与星期。
+2. 如果用户提到城市，用 get_weather 查询。
+3. 再用 search_knowledge_base 查相关记录。
+……</code></pre>
+  <p>front-matter 只有三个字段：<code>name</code> / <code>description</code> / <code>tools</code>。正文只写"做什么、怎么回答"，<strong>不放代码</strong>。</p>
+
+  <h2>二、渐进披露：先目录，后正文</h2>
+  <div class="diagram">
+    <div class="dbox"><strong>启动</strong><span>只读 name + description → 注入 system</span></div>
+    <div class="darrow">↓ 模型判断需要</div>
+    <div class="dbox"><strong>load_skill(name)</strong><span>正文进 system，工具集收窄</span></div>
+    <div class="darrow">↓</div>
+    <div class="dbox lead"><strong>后续轮次</strong><span>只看到该 skill 的工具</span></div>
+    <div class="dcap">图 1 · 正文按需加载，避免一开始就塞满上下文</div>
+  </div>
+
+  <h2>三、两条触发路径</h2>
+  <table>
+    <thead><tr><th>路径</th><th>怎么走</th><th>工具集</th></tr></thead>
+    <tbody>
+      <tr><td>显式</td><td>请求里 <code>skill="daily-brief"</code></td><td>启动即收窄</td></tr>
+      <tr><td>自动</td><td>模型调用 <code>load_skill</code></td><td>加载后收窄</td></tr>
+    </tbody>
+  </table>
+  <p><code>SKILL_AUTO_SELECT=false</code> 时只保留显式路径：不注入 skill 清单，也不提供 <code>load_skill</code>。</p>
+
+  <h2>四、收窄工具集：不是"多给"，而是"少给"</h2>
+  <pre><code>allowed_tools = set(skill.tools) if skill.tools else None
+
+def _filter_schemas(base, allowed, load_skill_available):
+    schemas = [s for s in base if allowed is None or s["function"]["name"] in allowed]
+    if load_skill_available:
+        schemas.append(LOAD_SKILL_SCHEMA)
+    return schemas</code></pre>
+  <p>加载 <code>kb-research</code> 后，模型只看到 <code>search_knowledge_base</code>，看不到日期、天气、网页搜索、MCP 写文件。这是<strong>权限收窄</strong>，不只是提示词建议。</p>
+  <div class="note">
+    <span class="label">为什么不用 if-else 判断 skill</span>
+    skill 的价值在于"一组工具 + 一段提示词"的组合。用数据结构表达（tools 列表），代码只需要过滤 schema，不需要为每个 skill 写分支。
+  </div>
+
+  <h2>五、解析 front-matter 为什么不用 PyYAML</h2>
+  <p>格式很简单（三行 key: value），自己解析就够，避免为一个 demo 引入新依赖。代价是只支持<strong>扁平结构</strong>；如果以后要嵌套字段，再换 YAML。</p>
+
+  <h2>六、实测数据</h2>
+  <table>
+    <thead><tr><th>验收点</th><th>实测</th></tr></thead>
+    <tbody>
+      <tr><td>加载 skill</td><td>✅ <code>daily-brief</code> / <code>kb-research</code> 两个</td></tr>
+      <tr><td>显式 <code>skill=daily-brief</code></td><td>✅ 首轮工具只有 <code>get_datetime / search_knowledge_base / get_weather</code>，无 <code>load_skill</code></td></tr>
+      <tr><td>自动选择</td><td>✅ 首轮含 <code>load_skill</code>；第二轮工具收窄为 3 个；<code>run.skill=daily-brief</code></td></tr>
+      <tr><td><code>SKILL_AUTO_SELECT=false</code></td><td>✅ 无 <code>load_skill</code>，system 无 skill 清单</td></tr>
+      <tr><td>未知 skill</td><td>✅ runner 抛 <code>ValueError</code>；API 返回 400 <code>skill_not_found</code></td></tr>
+      <tr><td><code>GET /api/agent/skills</code></td><td>✅ 返回两个 name + description</td></tr>
+    </tbody>
+  </table>
+
+  <h2>七、亲手做一遍</h2>
+  <div class="note">
+    <span class="label">练习 A · 写第三个 skill</span>
+    新建 <code>skills/md-writer/SKILL.md</code>，tools 只留 <code>md_writer.write_markdown</code>（需要先开启 MCP），观察自动选择时工具集是否正确。
+  </div>
+  <div class="note">
+    <span class="label">练习 B · 越权声明</span>
+    在 SKILL.md 的 tools 里写一个不存在的工具名，观察：它不会凭空出现，因为 schema 过滤只从已注册工具里选。
+  </div>
+  <div class="note">
+    <span class="label">练习 C · 关闭自动选择</span>
+    设 <code>SKILL_AUTO_SELECT=false</code>，确认前端下拉仍能显式指定，但模型不会自己加载 skill。
+  </div>
+
+  <h2>八、自测（凭记忆答）</h2>
+  <div class="quiz" data-answer="a">
+    <p class="q">1. skill 的两个组成部分是什么？</p>
+    <button class="quiz-option" data-key="a">提示词正文 + 允许使用的工具子集</button>
+    <button class="quiz-option" data-key="b">新的模型 + 新的向量库</button>
+    <button class="quiz-option" data-key="c">API Key + endpoint</button>
+    <button class="quiz-option" data-key="d">前端页面 + 后端路由</button>
+    <p class="feedback"
+       data-correct="对。skill 是「工作手册 + 权限范围」，不是新能力。"
+       data-wrong="再想想：它复用已有工具，只改变提示词与可见工具集。"></p>
+  </div>
+  <div class="quiz" data-answer="a">
+    <p class="q">2. 渐进披露指的是什么？</p>
+    <button class="quiz-option" data-key="a">启动只给目录，需要时再加载正文</button>
+    <button class="quiz-option" data-key="b">一次性把所有 skill 正文塞进 system</button>
+    <button class="quiz-option" data-key="c">每次请求随机选一个 skill</button>
+    <button class="quiz-option" data-key="d">把 skill 正文写进用户问题</button>
+    <p class="feedback"
+       data-correct="对。先 name + description，再按需给正文，节省上下文。"
+       data-wrong="再想想：一次性全塞进去就失去了「按需」的意义。"></p>
+  </div>
+  <div class="quiz" data-answer="a">
+    <p class="q">3. 加载 skill 后为什么要收窄工具集？</p>
+    <button class="quiz-option" data-key="a">把权限限制在该 skill 声明的范围内</button>
+    <button class="quiz-option" data-key="b">为了让工具调用速度更快</button>
+    <button class="quiz-option" data-key="c">因为模型一次只能看三个工具</button>
+    <button class="quiz-option" data-key="d">MCP 要求必须收窄</button>
+    <p class="feedback"
+       data-correct="对。这是权限设计，避免 skill 越权使用其他工具。"
+       data-wrong="再想想：不是性能或协议限制，而是最小权限原则。"></p>
+  </div>
+
+  <h2>九、想深入时读这个</h2>
+  <p><strong>本课代码：</strong><a href="../../kbqa/skills.py">kbqa/skills.py</a> · <a href="../../skills/daily-brief/SKILL.md">daily-brief/SKILL.md</a> · <a href="../../skills/kb-research/SKILL.md">kb-research/SKILL.md</a></p>
+  <p><strong>契约：</strong><a href="../../docs/spec-agent.md">spec-agent.md §19.11</a></p>
+
+  <div class="foot">
+    不清楚就直接问，比如"skill 和 system prompt 有什么区别""多个 skill 能不能叠加"。我是你的老师，问多基础都可以。
+  </div>
+
+</div>
+<script src="../assets/quiz.js"></script>
+</body>
+</html>

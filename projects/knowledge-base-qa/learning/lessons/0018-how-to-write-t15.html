@@ -1,0 +1,267 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>课程 0018 · 给模型一张工具说明书：拆解 T15</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+<div class="wrap">
+
+  <p class="eyebrow">课程 0018 · Agent 化实战 · 对应任务 T15</p>
+  <h1>给模型一张"工具说明书"</h1>
+  <p class="lede">T15 不实现任何具体工具，只做三件事：<strong>描述工具、登记工具、把工具翻译成模型看得懂的说明书。</strong>这一层看起来"没什么业务逻辑"，但它决定了后面 agent loop 能不能用同一种方式调用任意工具。</p>
+
+  <div class="win">
+    <strong>学完你能做到：</strong>解释 <code>Callable[[dict], ToolResult]</code>；看懂 <code>@tool</code> 装饰器如何把函数变成 Tool；说清"模型看到的 schema"和"Python 函数"为什么是两回事；并亲手跑通注册表的四条验收。
+    <br><span class="muted">配套：<a href="../reference/python-concepts-glossary.html">术语表</a> · 前置 <a href="0017-fullstack-agent-map.html">课程 0017</a></span>
+  </div>
+
+  <h2>一、T15 在做什么</h2>
+  <p>工具层只有四个东西：</p>
+  <table>
+    <thead><tr><th>名字</th><th>角色</th><th>一句话</th></tr></thead>
+    <tbody>
+      <tr><td><code>ToolResult</code></td><td>结果</td><td>工具执行完返回什么：给模型看的 <code>text</code> + 给前端看的 <code>data</code></td></tr>
+      <tr><td><code>Tool</code></td><td>说明书</td><td>名字、用途、参数 schema、真正执行的函数</td></tr>
+      <tr><td><code>ToolRegistry</code></td><td>登记表</td><td>按名字存取工具，并批量生成模型要的 schema</td></tr>
+      <tr><td><code>@tool</code></td><td>快捷方式</td><td>把一个函数直接登记成 <code>Tool</code></td></tr>
+    </tbody>
+  </table>
+
+  <div class="diagram">
+    <div class="dbox"><strong>模型</strong><span>只看得到 name / description / parameters</span></div>
+    <div class="darrow">↓ 决定调用某个工具，输出 tool_call</div>
+    <div class="dbox"><strong>agent loop（T18 才写）</strong><span>解析参数 → 找到 handler → 执行</span></div>
+    <div class="darrow">↓ 调用</div>
+    <div class="dbox lead"><strong>handler(args)</strong><span>真正的 Python 代码，返回 ToolResult</span></div>
+    <div class="dcap">图 1 · 模型永远不执行代码，它只是"点名"；执行发生在你的进程里</div>
+  </div>
+
+  <h2>二、先补语法：<code>Callable</code></h2>
+  <p><code>Callable</code> 是类型注解里表示<strong>"可调用对象"</strong>的类型。函数、lambda、实现了 <code>__call__</code> 的对象，都算。</p>
+  <pre><code>from collections.abc import Callable
+
+def add(a: int, b: int) -&gt; int:
+    return a + b
+
+# 读作：接收 int、int，返回 int 的可调用对象
+f: Callable[[int, int], int] = add</code></pre>
+
+  <table>
+    <thead><tr><th>写法</th><th>含义</th></tr></thead>
+    <tbody>
+      <tr><td><code>Callable[[], str]</code></td><td>无参数，返回 str</td></tr>
+      <tr><td><code>Callable[[dict], ToolResult]</code></td><td>接收 1 个 dict，返回 ToolResult</td></tr>
+      <tr><td><code>Callable[[int, str], bool]</code></td><td>接收 int、str，返回 bool</td></tr>
+      <tr><td><code>Callable[..., str]</code></td><td>任意参数，返回 str</td></tr>
+    </tbody>
+  </table>
+
+  <div class="note">
+    <span class="label">两个易错点</span>
+    ① <code>[dict]</code> 是<strong>参数类型列表</strong>，不是"dict 的列表"；<br>
+    ② 类型注解<strong>运行时不做检查</strong>，它只服务人和 IDE / mypy。
+  </div>
+
+  <p>所以 <code>Tool.handler: Callable[[dict], ToolResult]</code> 的意思是：<strong>随便你给我一个函数，只要它吃一个 dict、吐一个 ToolResult 就行。</strong>不同工具的函数名和内部逻辑可以完全不同，调用方式却统一成 <code>tool.handler(args)</code>。</p>
+
+  <h2>三、为什么参数是一个 <code>dict</code></h2>
+  <p>因为参数来自模型。模型输出的是 JSON 字符串：</p>
+  <pre><code>{"text": "你好"}</code></pre>
+  <p>上层把它解析成 Python 的 <code>dict</code>，再交给 handler：</p>
+  <pre><code>args = json.loads(tool_call.arguments)
+result = registry.get(tool_call.name).handler(args)</code></pre>
+  <p>如果一开始就给每个工具定义不同的函数签名（<code>def echo(text: str)</code>、<code>def weather(city: str, days: int)</code>），registry 就没法用同一行代码调用它们——必须写一堆 <code>if name == ...</code>。统一成 <code>dict</code>，换来的是<strong>一个循环就能调度所有工具</strong>。</p>
+
+  <h2>四、模型看到的世界：JSON Schema</h2>
+  <p><code>Tool.parameters</code> 是<strong>手写的 JSON Schema</strong>，描述参数长什么样。例如 <code>echo</code>：</p>
+  <pre><code>{
+  "type": "object",
+  "properties": {
+    "text": {"type": "string", "description": "要回显的文本"}
+  },
+  "required": ["text"]
+}</code></pre>
+
+  <p><code>registry.schemas()</code> 把它翻译成 OpenAI tools 格式：</p>
+  <pre><code>{
+  "type": "function",
+  "function": {
+    "name": "echo",
+    "description": "把输入原样返回，仅用于验证注册表。",
+    "parameters": { ...上面的 JSON Schema... }
+  }
+}</code></pre>
+
+  <table>
+    <thead><tr><th>字段</th><th>作用</th></tr></thead>
+    <tbody>
+      <tr><td><code>type: "function"</code></td><td>协议固定值，告诉模型这是函数工具</td></tr>
+      <tr><td><code>function.name</code></td><td>模型点名时用的名字，必须全局唯一</td></tr>
+      <tr><td><code>function.description</code></td><td>决定模型"什么时候该用它"（其实就是提示词）</td></tr>
+      <tr><td><code>function.parameters</code></td><td>参数的 JSON Schema，决定模型怎么填参数</td></tr>
+    </tbody>
+  </table>
+
+  <div class="note">
+    <span class="label">为什么不用类型注解自动生成 schema</span>
+    §19.5 要求<strong>手写</strong>，理由有两条：① 模型看到的就是这份 dict，你可以逐字对照"模型到底看见了什么"；② 不引入额外的 schema 生成依赖与隐式行为。对学习来说，<strong>看得见</strong>比省事更重要。
+  </div>
+
+  <h2>五、注册表：一张 dict 就是全部</h2>
+  <pre><code>class ToolRegistry:
+    def __init__(self) -&gt; None:
+        self._tools: dict[str, Tool] = {}
+
+    def register(self, tool: Tool) -&gt; None:
+        if tool.name in self._tools:
+            raise ValueError(f"工具名重复：{tool.name}")
+        self._tools[tool.name] = tool</code></pre>
+
+  <p>三个设计点：</p>
+  <ul>
+    <li><strong>dict 保持插入顺序</strong>：<code>schemas()</code> 的输出顺序稳定，方便逐字核对。</li>
+    <li><strong>重名直接 <code>ValueError</code></strong>：如果后注册的覆盖先注册的，模型可能调用到错误的实现，而且<strong>一路无错</strong>。fail fast 比静默覆盖便宜得多。</li>
+    <li><strong>只提供 <code>get / names / schemas</code></strong>：本层不执行、不编排、不兜异常。</li>
+  </ul>
+
+  <h2>六、为什么不在这里 try/except</h2>
+  <p>工具执行失败是<strong>运行时的正常可能性</strong>：网络断了、参数不合法、第三方接口返回错误。T15 的职责只是"登记与查找"，它没有上下文判断"这次失败该不该让整个请求失败"。</p>
+  <div class="note">
+    <span class="label">职责边界</span>
+    异常应该由<strong>知道下一步怎么办的人</strong>处理。agent loop（T18）知道：把异常转成 <code>ToolResult(text="工具执行失败：…")</code>，该步记 <code>ok=False</code>，让模型换个策略继续。所以 T15 <strong>原样放行异常</strong>，这不是遗漏，是刻意为之。
+  </div>
+
+  <h2>七、<code>@tool</code> 装饰器逐行看</h2>
+  <pre><code>def tool(name, description, parameters):
+    def decorator(handler):
+        return Tool(
+            name=name,
+            description=description,
+            parameters=parameters,
+            handler=handler,
+        )
+    return decorator</code></pre>
+
+  <p>它其实是"返回装饰器的函数"：</p>
+  <ol>
+    <li><code>tool(...)</code> 先记住 name / description / parameters，返回 <code>decorator</code>；</li>
+    <li>Python 把下面的函数作为 <code>handler</code> 传给 <code>decorator</code>；</li>
+    <li><code>decorator</code> 返回一个 <code>Tool</code>，原来的函数名就绑定到了这个 Tool 上。</li>
+  </ol>
+  <p>所以下面的 <code>echo</code> 已经<strong>不是函数</strong>，而是一个 <code>Tool</code> 实例：</p>
+  <pre><code>@tool(name="echo", description="...", parameters={...})
+def echo(args: dict) -&gt; ToolResult:
+    return ToolResult(text=args["text"])
+
+registry.register(echo)          # echo 是 Tool，不是函数</code></pre>
+
+  <h2>八、一次工具调用的完整生命周期</h2>
+  <div class="diagram">
+    <div class="dbox"><strong>① 定义 + 注册</strong><span>@tool 生成 Tool → registry.register</span></div>
+    <div class="darrow">↓</div>
+    <div class="dbox"><strong>② 生成说明书</strong><span>registry.schemas() → 随 messages 发给模型</span></div>
+    <div class="darrow">↓ 模型返回 tool_call(name="echo", arguments='{"text":"hi"}')</div>
+    <div class="dbox"><strong>③ 解析 + 执行</strong><span>json.loads → registry.get("echo").handler({"text":"hi"})</span></div>
+    <div class="darrow">↓</div>
+    <div class="dbox lead"><strong>④ 回填</strong><span>ToolResult.text 作为 role="tool" 消息再发给模型</span></div>
+    <div class="dcap">图 2 · T15 只负责 ① 和 ②；③④ 是 T16 / T18 的事</div>
+  </div>
+
+  <h2>九、实测数据</h2>
+  <table>
+    <thead><tr><th>验收点</th><th>实测</th></tr></thead>
+    <tbody>
+      <tr><td>注册 <code>echo</code> → <code>schemas()</code> 结构正确</td><td>✅ 含 <code>type / function / name / description / parameters</code></td></tr>
+      <tr><td>调用工具拿到 <code>ToolResult.text</code></td><td>✅ 传 <code>{"text": "hi"}</code> 返回 <code>hi</code></td></tr>
+      <tr><td>注册重名 → <code>ValueError</code></td><td>✅ <code>工具名重复：echo</code></td></tr>
+      <tr><td>本层不吞 handler 异常</td><td>✅ 故意抛 <code>RuntimeError</code>，原样冒到调用方</td></tr>
+      <tr><td>未引入新依赖</td><td>✅ 只用 <code>dataclasses</code> / <code>collections.abc</code></td></tr>
+    </tbody>
+  </table>
+
+  <h2>十、亲手做一遍</h2>
+
+  <div class="note">
+    <span class="label">练习 A · 打印说明书</span>
+    注册一个 <code>echo</code> 工具，把 <code>registry.schemas()</code> 用 <code>json.dumps(..., ensure_ascii=False, indent=2)</code> 打印出来。然后回答：<strong>模型看得见 handler 的源码吗？</strong>（答案：看不见，只有 name / description / parameters。）
+  </div>
+
+  <div class="note">
+    <span class="label">练习 B · 制造一次重名</span>
+    把同一个 <code>echo</code> 注册两次，观察 <code>ValueError</code>。再想想：如果这里改成"覆盖"，会有什么问题？（提示：模型点名 <code>echo</code> 时，你怎么知道实际跑的是哪个实现？）
+  </div>
+
+  <div class="note">
+    <span class="label">练习 C · 验证异常边界</span>
+    注册一个 handler 直接 <code>raise RuntimeError("boom")</code>，然后<strong>直接调用</strong> <code>registry.get("boom").handler({})</code>。确认异常原样抛出。再想想：T18 的 loop 应该在哪一行接住它？
+  </div>
+
+  <div class="note">
+    <span class="label">练习 D · 设计题</span>
+    为什么 <code>schemas()</code> 返回的是新列表，而不是把内部 <code>_tools</code> 直接暴露出去？如果外部拿到内部 dict 并删掉一个工具，会发生什么？
+  </div>
+
+  <h2>十一、自测（凭记忆答）</h2>
+
+  <div class="quiz" data-answer="a">
+    <p class="q">1. <code>Callable[[dict], ToolResult]</code> 表示什么？</p>
+    <button class="quiz-option" data-key="a">接收一个 dict、返回 ToolResult 的可调用对象</button>
+    <button class="quiz-option" data-key="b">接收一个 ToolResult、返回 dict 的可调用对象</button>
+    <button class="quiz-option" data-key="c">一个包含 dict 和 ToolResult 的列表</button>
+    <button class="quiz-option" data-key="d">一个必须是 dict 类型的 ToolResult</button>
+    <p class="feedback"
+       data-correct="对。方括号里先是参数类型列表，逗号后面才是返回类型。"
+       data-wrong="再想想：Callable[[参数类型...], 返回类型]，一个参数所以是 [dict]。"></p>
+  </div>
+
+  <div class="quiz" data-answer="a">
+    <p class="q">2. 注册重名工具时，为什么直接抛 <code>ValueError</code> 而不是覆盖？</p>
+    <button class="quiz-option" data-key="a">静默覆盖会让模型可能调用到错误的实现</button>
+    <button class="quiz-option" data-key="b">覆盖会让 Python 解释器直接崩溃</button>
+    <button class="quiz-option" data-key="c">ValueError 是 dict 赋值的强制要求</button>
+    <button class="quiz-option" data-key="d">覆盖会显著增加模型 token 消耗</button>
+    <p class="feedback"
+       data-correct="对。重名是配置错误，越早暴露越便宜；覆盖会把冲突藏起来。"
+       data-wrong="再想想：第 3 行的 if 只是 fail fast，没有任何性能或协议要求。"></p>
+  </div>
+
+  <div class="quiz" data-answer="a">
+    <p class="q">3. handler 收到的参数是什么？</p>
+    <button class="quiz-option" data-key="a">已经解析好的 dict</button>
+    <button class="quiz-option" data-key="b">模型返回的原始 JSON 字符串</button>
+    <button class="quiz-option" data-key="c">ToolCall 对象本身</button>
+    <button class="quiz-option" data-key="d">OpenAI SDK 的 Response 对象</button>
+    <p class="feedback"
+       data-correct="对。解析由上层完成；解析失败时按 §19.8 记成 {&quot;_raw&quot;: ...}。"
+       data-wrong="再想想：统一成一个 dict，registry 才能用同一行代码调度所有工具。"></p>
+  </div>
+
+  <div class="quiz" data-answer="a">
+    <p class="q">4. 为什么 T15 不捕获 handler 抛出的异常？</p>
+    <button class="quiz-option" data-key="a">因为本层不知道该不该让整个请求失败，交给 agent loop 统一处理</button>
+    <button class="quiz-option" data-key="b">因为 Python 不允许在注册表里写 try/except</button>
+    <button class="quiz-option" data-key="c">因为捕获异常会让工具执行得更慢</button>
+    <button class="quiz-option" data-key="d">因为 handler 保证永远不会抛异常</button>
+    <p class="feedback"
+       data-correct="对。异常该由知道下一步怎么办的人处理；loop 会把它记成 ok=False 并继续。"
+       data-wrong="再想想：这是职责边界，不是语言限制。"></p>
+  </div>
+
+  <h2>十二、想深入时读这个</h2>
+  <p><strong>首选：</strong><a href="https://docs.python.org/zh-cn/3/library/typing.html#typing.Callable">Python 官方文档 · typing.Callable</a>（官方中文）——`Callable[[参数], 返回]` 的权威定义。</p>
+  <p><strong>工具 schema：</strong><a href="https://json-schema.org/learn/getting-started-step-by-step">JSON Schema 官方入门</a>（英文，无官方中文）——`type / properties / required` 分别是什么意思。</p>
+  <p><strong>协议：</strong><a href="https://learn.microsoft.com/zh-cn/azure/foundry/openai/how-to/function-calling">Microsoft Learn · 如何使用函数调用</a>（官方中文）——模型如何输出 tool_call、工具结果如何回填。</p>
+  <p><strong>本项目实际使用：</strong><a href="https://help.aliyun.com/zh/model-studio/qwen-function-calling">阿里云百炼 · Function Calling</a>（官方中文）——Qwen / DashScope 的工具调用示例。</p>
+  <p class="muted">完整资源见 <a href="../RESOURCES.md">RESOURCES.md</a>。</p>
+
+  <div class="foot">
+    不清楚就直接问，比如"装饰器为什么返回 Tool 而不是函数""schema 里的 required 不写会怎样"。我是你的老师，问多基础都可以。
+  </div>
+
+</div>
+<script src="../assets/quiz.js"></script>
+</body>
+</html>

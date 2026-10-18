@@ -28,6 +28,28 @@
   解释编码/解码为何会出错、为什么必须显式指定 UTF-8。用在哪：课程 0003 的"编码坑"。
 - [Python 官方文档 · typing（类型注解）](https://docs.python.org/zh-cn/3/library/typing.html)（官方中文）
   说明"类型注解在运行时不被强制，但为人和工具服务"。用在哪：理解为什么写 `dashscope_api_key: str`。
+- [Python 官方文档 · typing.Callable](https://docs.python.org/zh-cn/3/library/typing.html#typing.Callable)（官方中文）
+  `Callable[[参数类型...], 返回类型]` 的权威定义。用在哪：课程 0018、`kbqa/tools/base.py` 的 `handler`。
+- [JSON Schema 官方入门](https://json-schema.org/learn/getting-started-step-by-step)（英文，无官方中文）
+  `type / properties / required` 分别是什么意思。用在哪：课程 0018、工具参数 schema。
+- [Microsoft Learn · 如何使用函数调用（官方中文）](https://learn.microsoft.com/zh-cn/azure/foundry/openai/how-to/function-calling)（官方中文）
+  OpenAI 兼容协议的函数调用三步流程、`tools` JSON、并行调用与结果回填。用在哪：课程 0018/0019、T16/T18 的协议实现。
+- [阿里云百炼 · Function Calling（官方中文）](https://help.aliyun.com/zh/model-studio/qwen-function-calling)（官方中文）
+  本项目实际使用的 Qwen / DashScope 工具调用示例（OpenAI 兼容 + DashScope 两种写法）。用在哪：课程 0019、`kbqa/llm.py` 的 `chat_with_tools`。
+- [Python 官方文档 · zoneinfo](https://docs.python.org/zh-cn/3/library/zoneinfo.html)（官方中文）
+  IANA 时区数据库与 `ZoneInfo` 的用法。用在哪：课程 0020、`kbqa/tools/datetime_tool.py`。
+- [MCP 官方文档](https://modelcontextprotocol.io/docs/getting-started/intro)（英文，无官方中文）
+  协议、传输、工具/资源/提示的定义。用在哪：课程 0027/0028、T24/T25。
+- [MCP Python SDK 文档](https://py.sdk.modelcontextprotocol.io/)（英文，无官方中文）
+  `MCPServer` / `ClientSession` / `stdio_client` 的 API 与迁移说明。用在哪：`mcp_servers/md_writer/server.py`、`kbqa/mcp_client.py`。
+- [LangGraph 官方仓库](https://github.com/langchain-ai/langgraph)（英文，无官方中文）
+  StateGraph / 节点 / 边 / 持久化。用在哪：课程 0031/0032、`kbqa/agent_graph.py`。
+- [LangGraph · PyPI](https://pypi.org/project/langgraph/)（英文）
+  版本与安装方式。用在哪：`requirements-langgraph.txt`。
+- [MDN · 使用服务器发送事件](https://developer.mozilla.org/zh-CN/docs/Web/API/Server-sent_events/Using_server-sent_events)（官方中文）
+  SSE 格式与浏览器 API。用在哪：课程 0030、`/api/agent/chat/stream`。
+- [HTTPX 官方文档](https://www.python-httpx.org/)（英文，无官方中文）
+  同步/异步 HTTP 客户端、timeout 与异常类型。用在哪：课程 0025/0026、`web_search.py` / `weather.py`。
 - [Pydantic Settings 官方文档](https://pydantic.dev/docs/validation/latest/concepts/pydantic_settings/)（英文，无官方中文）
   `BaseSettings` / `SettingsConfigDict` / `.env` 读取与优先级的权威说明。用在哪：T0 的 `config.py`。
 - [FastAPI 教程 · 设置和环境变量](https://fastapi.tiangolo.com/zh/advanced/settings/)（官方中文）
@@ -36,6 +58,14 @@
   路由与装饰器（`@app.get` 这类）的最小可运行例子。用在哪：课程 0014、`api/routes.py` 的"把函数挂到 URL 上"。
 - [FastAPI 教程 · 响应模型](https://fastapi.tiangolo.com/zh/tutorial/response-model/)（官方中文）
   `response_model` 与"内部对象 vs 对外模型"的官方说明。用在哪：课程 0014、`api/schemas.py` 的 `to_xxx_out()`。
+- [FastAPI 教程 · 测试](https://fastapi.tiangolo.com/zh/tutorial/testing/)（官方中文）
+  `TestClient` 的用法与断言方式。用在哪：课程 0022、T19 的接口验收。
+- [Martin Fowler · Inversion of Control Containers and the Dependency Injection pattern](https://martinfowler.com/articles/injection.html)（英文，无官方中文）
+  DI 的经典原始文章：控制反转、依赖注入、服务定位器的区别。用在哪：课程 0013 / 0033、理解 `build_kb_tool` 与 `app.state` 的装配方式。
+- [Vue 官方中文文档 · 组件基础](https://cn.vuejs.org/guide/essentials/component-basics.html)（官方中文）
+  props / emits / 单向数据流。用在哪：课程 0023、`web/src/components/AgentPanel.vue` 与 `ToolTrace.vue` 的分工。
+- [Vue 官方中文文档 · 快速上手](https://cn.vuejs.org/guide/quick-start.html)（官方中文）
+  Vite + Vue 3 工程的最小结构。用在哪：`web/` 工程与课程 0023 的构建步骤。
 - [MDN · HTTP 响应状态码](https://developer.mozilla.org/zh-CN/docs/Web/HTTP/Status)（官方中文）
   200 / 400 / 404 / 422 / 502 等状态码的权威定义。用在哪：课程 0014 的状态码表与错误信封。
 - [Pydantic 官方文档 · Models](https://docs.pydantic.dev/latest/concepts/models/)（英文，无官方中文）

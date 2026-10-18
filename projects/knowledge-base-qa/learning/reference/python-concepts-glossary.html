@@ -24,6 +24,9 @@
     <dt>类型注解 <code>name: str</code><span class="tag syntax">语法</span></dt>
     <dd>说明"这个值应该是什么类型"。运行时<strong>不检查</strong>，只服务人和工具（IDE、类型检查器）。</dd>
 
+    <dt><code>Callable</code><span class="tag syntax">语法</span></dt>
+    <dd>类型注解里表示"可调用对象"（函数、lambda、实现了 <code>__call__</code> 的对象）。写法 <code>Callable[[参数类型...], 返回类型]</code>：<code>Callable[[dict], ToolResult]</code> = 吃一个 dict、返回 ToolResult 的函数；<code>Callable[[], str]</code> = 无参数、返回 str。运行时同样不检查。</dd>
+
     <dt>默认值 <code>x: int = 10</code><span class="tag syntax">语法</span></dt>
     <dd>等号后是真正赋值；创建/调用时不给这个值就用它。</dd>
 
@@ -80,6 +83,48 @@
 
     <dt>fail fast<span class="tag eng">工程</span></dt>
     <dd>缺关键配置就立刻报错，别带着错配置继续跑。例：密钥字段不给默认值。</dd>
+
+    <dt>JSON Schema<span class="tag eng">工程</span></dt>
+    <dd>用一份 JSON 描述"数据长什么样"的通用格式：<code>{"type":"object","properties":{...},"required":[...]}</code>。模型的工具说明书就用它——模型看得见字段名、类型、说明和必填项，但看不见 Python 函数源码。</dd>
+
+    <dt>注册表（registry）<span class="tag eng">工程</span></dt>
+    <dd>一张"名字 → 实现"的表，运行时按名字查。好处：调用方不需要认识具体实现，新增工具只登记一行。本项目用 dict 实现，<strong>重名直接报错</strong>，避免静默覆盖。见 <code>kbqa/tools/base.py</code>。</dd>
+
+    <dt>工具（tool）/ tool_call<span class="tag eng">工程</span></dt>
+    <dd>Agent 语境里，tool 是模型可以主动调用的函数；tool_call 是模型输出的"我要调 X，参数是 Y"（OpenAI 协议里是 <code>message.tool_calls[]</code>）。模型只负责点名，真正的代码在你的进程里执行。</dd>
+
+    <dt>finish_reason<span class="tag eng">工程</span></dt>
+    <dd>模型这一轮为什么停下：<code>stop</code> = 正常说完；<code>tool_calls</code> = 想调用工具；<code>length</code> = 被长度限制截断。编排循环靠它判断"该继续还是要结果"。</dd>
+
+    <dt>agent loop<span class="tag eng">工程</span></dt>
+    <dd>「调模型 → 执行工具 → 回填 → 再调模型」的循环，直到模型给最终答案或达到步数上限。外层 while 管轮数，内层 for 管一轮多个 tool_call。见 <code>kbqa/agent.py</code>。</dd>
+
+    <dt>stop_reason<span class="tag eng">工程</span></dt>
+    <dd>agent 为什么停下：<code>final_answer</code> = 模型给了答案；<code>max_steps</code> = 达到轮数上限。它是"正常结束"与"未收敛"的区分标记。</dd>
+
+    <dt>TestClient<span class="tag eng">工程</span></dt>
+    <dd>FastAPI 自带的测试客户端，不用真的启动服务器就能发请求、断言状态码与 JSON。配合 <code>app.state</code> 替换依赖，可以在不烧模型额度的前提下测接口。见 <code>api/routes.py</code> 的验收方式。</dd>
+
+    <dt>props / emits<span class="tag eng">工程</span></dt>
+    <dd>Vue 组件的两个边界：props 是父组件传进来的只读数据，emits 是子组件向父组件发的事件。展示组件只靠这两者工作，不直接发网络请求。见 <code>AgentPanel.vue</code> / <code>ToolTrace.vue</code>。</dd>
+
+    <dt>mock-first / 降级<span class="tag eng">工程</span></dt>
+    <dd>外部依赖还没就绪时，先用<strong>明确标注</strong>的假数据把链路跑通（mock），并把异常转成可继续处理的文本结果（降级）。关键纪律：mock 必须标注、报告必须写"未联调"，不能把假数据当成真实结果。见 <code>web_search.py</code> / <code>weather.py</code>。</dd>
+
+    <dt>MCP / stdio<span class="tag eng">工程</span></dt>
+    <dd>MCP（Model Context Protocol）是跨进程的工具协议：agent 作 client，工具服务作 server。stdio 传输通过子进程的标准输入输出通信，不需要网络。本项目用它在独立进程里写 markdown。见 <code>mcp_servers/md_writer/</code> 与 <code>kbqa/mcp_client.py</code>。</dd>
+
+    <dt>失败隔离<span class="tag eng">工程</span></dt>
+    <dd>可选依赖或外部进程失败时，只丢掉这一部分能力，主体继续工作。例：某个 MCP server 起不来 → 只丢该批工具，本地工具与 agent 仍可用。见 <code>register_mcp_tools</code>。</dd>
+
+    <dt>skill / 渐进披露<span class="tag eng">工程</span></dt>
+    <dd>skill = 一段提示词正文 + 一组允许使用的工具。渐进披露：启动只注入 name + description（目录），需要时经 <code>load_skill</code> 加载正文并收窄工具集，避免一开始塞满上下文。见 <code>kbqa/skills.py</code> 与 <code>skills/</code>。</dd>
+
+    <dt>StateGraph / 节点 / 条件边<span class="tag eng">工程</span></dt>
+    <dd>LangGraph 的三个核心概念：State 是共享状态，Node 是处理函数，Edge 决定下一步；条件边根据状态选择分支（如"有 tool_calls 去 tools，否则结束"）。它和 while 循环表达的是同一件事，只是把控制流声明化。见 <code>kbqa/agent_graph.py</code>。</dd>
+
+    <dt>IANA 时区 / <code>ZoneInfo</code><span class="tag eng">工程</span></dt>
+    <dd>时区的标准命名方式（如 <code>Asia/Shanghai</code>），由 <code>zoneinfo.ZoneInfo</code> 解析。它比 <code>+8:00</code> 更可靠：能自动处理夏令时与历史规则。见 <code>kbqa/tools/datetime_tool.py</code>。</dd>
 
     <dt>模块级单例<span class="tag eng">工程</span></dt>
     <dd>在模块末尾创建一次全局对象（如 <code>settings = Settings()</code>），全项目共用，避免配置漂移。</dd>
@@ -146,6 +191,12 @@
 
     <dt>工厂函数（factory）<span class="tag eng">工程</span></dt>
     <dd>集中对象创建逻辑的函数（如 <code>get_llm(settings)</code>）。换实现只改工厂一处，其余代码不动。</dd>
+
+    <dt>闭包工厂<span class="tag eng">工程</span></dt>
+    <dd>返回"已经绑定好依赖的函数/对象"的工厂。参数是注入点，内部函数通过闭包捕获依赖。例：<code>build_kb_tool(pipeline)</code> 返回的 handler 已经记住了 pipeline。见课程 0033。</dd>
+
+    <dt>组合根（composition root）<span class="tag eng">工程</span></dt>
+    <dd>整个应用里<strong>唯一</strong>集中创建依赖、完成装配的地方（本项目的 <code>api/main.py</code> / <code>create_app()</code>）。业务代码只接收成品，不自己 new。见课程 0033。</dd>
 
     <dt>适配器（adapter）<span class="tag eng">工程</span></dt>
     <dd>把外部依赖的接口与异常"翻译"成自己项目约定的形状（如把 SDK 异常包成带 <code>code</code> 的 <code>LLMError</code>），让业务代码不被外部细节渗透。</dd>

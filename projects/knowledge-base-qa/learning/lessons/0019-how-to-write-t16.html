@@ -1,0 +1,218 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>课程 0019 · 让模型"点名"工具：拆解 T16</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+<div class="wrap">
+
+  <p class="eyebrow">课程 0019 · Agent 化实战 · 对应任务 T16</p>
+  <h1>让模型"点名"工具</h1>
+  <p class="lede">T15 把工具登记好了，但模型还不会用。T16 只加一件事：<strong>让模型能返回"我要调 echo，参数是 {'text': 'hi'}"</strong>。注意，模型只负责点名，代码仍然在你的进程里执行。</p>
+
+  <div class="win">
+    <strong>学完你能做到：</strong>看懂 OpenAI 工具调用协议的四种消息角色；解释 <code>ChatResult.content</code> 为什么可能是 <code>None</code>；说清"回填工具结果再调一次"的完整闭环；并理解为什么 <code>chat()</code> 一行都不能改。
+    <br><span class="muted">配套：<a href="../reference/python-concepts-glossary.html">术语表</a> · 前置 <a href="0018-how-to-write-t15.html">课程 0018</a></span>
+  </div>
+
+  <h2>一、T16 在做什么</h2>
+  <table>
+    <thead><tr><th>改动</th><th>内容</th></tr></thead>
+    <tbody>
+      <tr><td><code>kbqa/models.py</code></td><td>新增两个 DTO：<code>ToolCall</code>、<code>ChatResult</code></td></tr>
+      <tr><td><code>kbqa/llm.py</code></td><td>协议加一个方法 <code>chat_with_tools</code>；<code>DashScopeChat</code> 实现它</td></tr>
+      <tr><td><code>chat()</code></td><td><strong>一行不改</strong>——固定链路还依赖它</td></tr>
+    </tbody>
+  </table>
+
+  <h2>二、先补概念：一次工具调用有四种消息</h2>
+  <p>OpenAI 兼容协议里，工具调用不是"一个特殊接口"，而是<strong>普通对话消息的一种形态</strong>。</p>
+
+  <table>
+    <thead><tr><th>role</th><th>谁写的</th><th>关键字段</th></tr></thead>
+    <tbody>
+      <tr><td><code>system</code></td><td>你</td><td><code>content</code>：人格、规则、skill 正文</td></tr>
+      <tr><td><code>user</code></td><td>用户</td><td><code>content</code>：问题</td></tr>
+      <tr><td><code>assistant</code></td><td>模型</td><td><code>content</code> 可选；想调工具时带 <code>tool_calls[]</code></td></tr>
+      <tr><td><code>tool</code></td><td>你的代码</td><td><code>tool_call_id</code> + <code>content</code>：工具执行结果</td></tr>
+    </tbody>
+  </table>
+
+  <div class="diagram">
+    <div class="dbox"><strong>user</strong><span>"请调用 echo 说 hi"</span></div>
+    <div class="darrow">↓ 第一次调用</div>
+    <div class="dbox"><strong>assistant</strong><span>content=None，tool_calls=[{id, name:"echo", arguments:'{"text":"hi"}'}]</span></div>
+    <div class="darrow">↓ 你的代码执行 handler({"text":"hi"})，把结果作为工具消息追加</div>
+    <div class="dbox"><strong>tool</strong><span>tool_call_id=call_xxx，content="hi"</span></div>
+    <div class="darrow">↓ 第二次调用</div>
+    <div class="dbox lead"><strong>assistant</strong><span>content="hi"，tool_calls=[]，finish_reason="stop"</span></div>
+    <div class="dcap">图 1 · 一次工具调用 = 两次模型调用，中间夹一条 role="tool" 消息</div>
+  </div>
+
+  <div class="note">
+    <span class="label">关键理解</span>
+    模型不会"执行"工具。它只是在 <code>assistant</code> 消息里写了一张<strong>调用申请单</strong>。什么时候执行、执行几次、失败怎么办，全是你的代码决定的。
+  </div>
+
+  <h2>三、两个 DTO</h2>
+  <pre><code>@dataclass
+class ToolCall:
+    id: str          # 回填 role="tool" 时必须带上，用来配对
+    name: str
+    arguments: str   # 注意：是 JSON 字符串，不是 dict
+
+@dataclass
+class ChatResult:
+    content: str | None      # 模型只请求工具时是 None
+    tool_calls: list[ToolCall]
+    finish_reason: str       # "tool_calls" / "stop" / ...</code></pre>
+
+  <p><code>arguments</code> 故意保持<strong>字符串</strong>，因为解析是调用方的责任：解析成功得到 dict；解析失败按 §19.8 记成 <code>{"_raw": "..."}</code>，交给 loop 处理。</p>
+
+  <h2>四、请求是怎么发的</h2>
+  <pre><code>request = {
+    "model": self._model,
+    "messages": messages,
+    "temperature": temp,
+    "extra_body": {"enable_thinking": self._enable_thinking},
+}
+if tools:
+    request["tools"] = tools</code></pre>
+
+  <p>两个设计点：</p>
+  <ul>
+    <li><strong><code>tools=[]</code> 时不传这个字段。</strong>部分兼容实现会拒绝空数组；不传就与 <code>chat()</code> 的请求体完全一致，满足"等价"验收。</li>
+    <li><strong>思考模式仍显式关闭。</strong>工具调用叠加思考模式时，<code>tool_calls</code> 更容易解析失败（§4.2 坑 3 的延伸）。</li>
+  </ul>
+
+  <h2>五、响应怎么解析</h2>
+  <pre><code>choice = resp.choices[0]
+message = choice.message
+content = message.content or None
+tool_calls = [
+    ToolCall(id=tc.id, name=tc.function.name, arguments=tc.function.arguments)
+    for tc in (message.tool_calls or [])
+]
+finish_reason = choice.finish_reason or ""</code></pre>
+
+  <p>注意 <code>message.tool_calls or []</code>：正常回答时这个字段可能是 <code>None</code>，直接遍历会炸。</p>
+
+  <div class="note">
+    <span class="label">为什么 content 可能是 None</span>
+    "我要调工具"和"我给你答案"是两种不同的输出。模型选择前者时，<code>content</code> 通常为空，信息全在 <code>tool_calls</code> 里。<strong>这不是错误。</strong>
+    <br>但如果既没有文本、也没有工具请求，就说明模型什么都没给——这时才按 <code>empty_content</code> 报错。
+  </div>
+
+  <h2>六、为什么 <code>chat()</code> 一行都不能改</h2>
+  <p>固定链路 <code>/api/qa</code>、评测、Notebook 全部依赖 <code>chat()</code> 的现有行为。T16 的验收明确要求 <code>git diff</code> 显示它<strong>只增不改</strong>。</p>
+  <p>于是新增能力走"加方法"而不是"改方法"：</p>
+  <pre><code>class LLMProvider(Protocol):
+    def chat(self, messages, temperature=None) -&gt; str: ...
+    def chat_with_tools(self, messages, tools, temperature=None) -&gt; ChatResult: ...</code></pre>
+  <p>已有的调用方仍然只认识 <code>chat()</code>，完全不受影响。这是<strong>开闭原则</strong>的一个具体例子：扩展行为，而不是修改已有行为。</p>
+
+  <h2>七、日志：参数必须截断</h2>
+  <pre><code>logger.info("工具调用完成 模型=%s 带工具=%d finish_reason=%s 工具调用数=%d 耗时=%dms", ...)
+for tc in tool_calls:
+    logger.info("工具请求 name=%s 参数=%s", tc.name, _truncate(tc.arguments, 50))</code></pre>
+  <p>工具参数可能很长（比如把整段文档塞进参数），也可能含敏感信息。按 §18.2：<strong>可以打印，但必须截断</strong>。这里统一截到 50 字符 + <code>...</code>。</p>
+
+  <h2>八、实测数据</h2>
+  <table>
+    <thead><tr><th>验收点</th><th>实测</th></tr></thead>
+    <tbody>
+      <tr><td>传 schema + "请调用 echo 说 hi" → 有 tool_call</td><td>✅ <code>tool_calls=[("echo", '{"text": "hi"}')]</code>，<code>finish_reason=tool_calls</code></td></tr>
+      <tr><td>回填 <code>role="tool"</code> 后再调</td><td>✅ <code>tool_calls=0</code>，最终 <code>content="hi"</code>，<code>finish_reason=stop</code></td></tr>
+      <tr><td><code>tools=[]</code> 与 <code>chat()</code> 等价</td><td>✅ 同一问题：77 字 vs 77 字，均非空</td></tr>
+      <tr><td>日志打点</td><td>✅ 含工具数、finish_reason、参数截断、耗时</td></tr>
+      <tr><td><code>chat()</code> 未改动</td><td>✅ <code>git diff</code> 只有新增行，无删除行</td></tr>
+    </tbody>
+  </table>
+
+  <p class="muted">耗时参考：第一次（请求工具）1336ms；回填后（给答案）459ms；无工具调用约 1.7s。</p>
+
+  <h2>九、亲手做一遍</h2>
+
+  <div class="note">
+    <span class="label">练习 A · 看清两种输出</span>
+    打印第一次结果的 <code>content</code> 和 <code>finish_reason</code>。回答：为什么 <code>content</code> 是 <code>None</code>？如果是 <code>""</code>，代码会怎么处理？
+  </div>
+
+  <div class="note">
+    <span class="label">练习 B · 故意漏掉 tool_call_id</span>
+    回填工具结果时，把 <code>tool_call_id</code> 删掉再调用。观察接口报什么错。（提示：模型要靠它把结果和申请单配对。）
+  </div>
+
+  <div class="note">
+    <span class="label">练习 C · 不传工具</span>
+    同样的 prompt，但 <code>tools=[]</code>。观察模型会怎么回答——它还能调用 echo 吗？这验证了"工具能力由 schema 决定"。
+  </div>
+
+  <div class="note">
+    <span class="label">练习 D · 设计题</span>
+    如果模型一次返回了 <strong>两个</strong> tool_calls，你的回填逻辑应该发几条 <code>role="tool"</code> 消息？顺序重要吗？
+  </div>
+
+  <h2>十、自测（凭记忆答）</h2>
+
+  <div class="quiz" data-answer="a">
+    <p class="q">1. 模型请求调用工具时，<code>ChatResult.content</code> 通常是什么？</p>
+    <button class="quiz-option" data-key="a">None，信息都在 tool_calls 里</button>
+    <button class="quiz-option" data-key="b">一定是空字符串，表示调用成功</button>
+    <button class="quiz-option" data-key="c">工具的执行结果</button>
+    <button class="quiz-option" data-key="d">OpenAI 的原始 Response 对象</button>
+    <p class="feedback"
+       data-correct="对。只点名、还没给答案，所以 content 为空；这不是错误。"
+       data-wrong="再想想：工具结果要等你执行完、作为 role=tool 消息回填后才出现。"></p>
+  </div>
+
+  <div class="quiz" data-answer="a">
+    <p class="q">2. 回填工具结果时，哪两个字段必须带上？</p>
+    <button class="quiz-option" data-key="a">role="tool" 和 tool_call_id</button>
+    <button class="quiz-option" data-key="b">name 和 arguments</button>
+    <button class="quiz-option" data-key="c">finish_reason 和 id</button>
+    <button class="quiz-option" data-key="d">temperature 和 model</button>
+    <p class="feedback"
+       data-correct="对。tool_call_id 用来把结果和模型那张申请单配对。"
+       data-wrong="再想想：模型可能一次申请多个工具，它要靠 id 区分哪个结果对应哪个申请。"></p>
+  </div>
+
+  <div class="quiz" data-answer="a">
+    <p class="q">3. 为什么 <code>tools=[]</code> 时不把空数组传给接口？</p>
+    <button class="quiz-option" data-key="a">部分兼容实现会拒绝空数组，且不传才能与 chat() 等价</button>
+    <button class="quiz-option" data-key="b">空数组会让 Python 直接语法报错</button>
+    <button class="quiz-option" data-key="c">传空数组会显著增加 token 消耗</button>
+    <button class="quiz-option" data-key="d">OpenAI SDK 禁止使用列表类型的参数</button>
+    <p class="feedback"
+       data-correct="对。省略字段 = 这次不带工具，请求体与 chat() 完全一致。"
+       data-wrong="再想想：这是协议兼容性问题，不是 Python 语法问题。"></p>
+  </div>
+
+  <div class="quiz" data-answer="a">
+    <p class="q">4. 为什么 T16 要求 <code>chat()</code> 只增不改？</p>
+    <button class="quiz-option" data-key="a">固定链路与评测都依赖它，改行为会引入回归</button>
+    <button class="quiz-option" data-key="b">Python 不允许修改已经定义过的方法</button>
+    <button class="quiz-option" data-key="c">修改 chat() 会让模型无法返回 tool_calls</button>
+    <button class="quiz-option" data-key="d">chat() 必须保持私有，不能被外部调用</button>
+    <p class="feedback"
+       data-correct="对。用新增方法扩展能力，已有调用方完全不受影响。"
+       data-wrong="再想想：这是开闭原则的工程要求，不是语言限制。"></p>
+  </div>
+
+  <h2>十一、想深入时读这个</h2>
+  <p><strong>首选（中文）：</strong><a href="https://learn.microsoft.com/zh-cn/azure/foundry/openai/how-to/function-calling">Microsoft Learn · 如何使用函数调用</a>（官方中文）——tool_calls 的请求/回填格式、并行调用、三步流程。</p>
+  <p><strong>本项目实际使用：</strong><a href="https://help.aliyun.com/zh/model-studio/qwen-function-calling">阿里云百炼 · Function Calling</a>（官方中文）——Qwen / DashScope 的工具调用示例与模型支持列表。</p>
+  <p><strong>schema：</strong><a href="https://json-schema.org/learn/getting-started-step-by-step">JSON Schema 官方入门</a>（英文，无官方中文）——工具参数为什么长成 <code>type/properties/required</code>。</p>
+  <p class="muted">完整资源见 <a href="../RESOURCES.md">RESOURCES.md</a>。</p>
+
+  <div class="foot">
+    不清楚就直接问，比如"为什么工具结果要用 role=tool 而不是塞进 user 消息""finish_reason 有哪些取值"。我是你的老师，问多基础都可以。
+  </div>
+
+</div>
+<script src="../assets/quiz.js"></script>
+</body>
+</html>

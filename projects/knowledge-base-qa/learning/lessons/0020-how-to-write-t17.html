@@ -1,0 +1,223 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>课程 0020 · 给模型两只手：拆解 T17</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+<div class="wrap">
+
+  <p class="eyebrow">课程 0020 · Agent 化实战 · 对应任务 T17</p>
+  <h1>给模型两只手</h1>
+  <p class="lede">T16 让模型会"点名"，T17 给它两个真能干活的工具：<strong>查日期时间</strong>和<strong>检索知识库</strong>。这一课的重点不是"写两个函数"，而是看清工具的三条边界：依赖怎么传、结果怎么格式化、失败怎么返回。</p>
+
+  <div class="win">
+    <strong>学完你能做到：</strong>解释为什么日期要交给代码算；看懂"工具结果编号"与"引用溯源"的绑定关系；说清 `build_kb_tool` 为什么用工厂而不是模块级变量；并亲手跑通四条验收。
+    <br><span class="muted">配套：<a href="../reference/python-concepts-glossary.html">术语表</a> · 前置 <a href="0018-how-to-write-t15.html">课程 0018</a> / <a href="0019-how-to-write-t16.html">0019</a></span>
+  </div>
+
+  <h2>一、T17 的两个工具</h2>
+  <table>
+    <thead><tr><th>工具</th><th>文件</th><th>解决什么问题</th></tr></thead>
+    <tbody>
+      <tr><td><code>get_datetime</code></td><td><code>datetime_tool.py</code></td><td>模型算不准"今天几号、星期几"</td></tr>
+      <tr><td><code>search_knowledge_base</code></td><td><code>kb_tool.py</code></td><td>把已有 RAG 检索包装成模型可调用的工具</td></tr>
+    </tbody>
+  </table>
+
+  <h2>二、为什么日期必须交给代码</h2>
+  <p>大模型的知识有截止时间，而且它<strong>没有时钟</strong>。"今天几号"这种问题，它只能猜。更糟的是"星期几"——这是语料里通常查不到、又特别容易算错的信息。</p>
+
+  <div class="note">
+    <span class="label">工具输出长什么样</span>
+    <pre><code>日期：2026-10-18
+星期：星期日
+时间：11:05:02（查询时刻）
+相对今天：今天（+0 天）</code></pre>
+    四个字段分别回答：哪一天、星期几、现在几点、离今天几天。模型拿到就能直接引用，不需要再推算。
+  </div>
+
+  <h2>三、参数与失败：优先返回文本</h2>
+  <pre><code>{
+  "type": "object",
+  "properties": {
+    "date": {"type": "string", "description": "today、tomorrow 或 YYYY-MM-DD"},
+    "timezone": {"type": "string", "description": "IANA 时区名，如 Asia/Shanghai"}
+  },
+  "required": []
+}</code></pre>
+
+  <p>两个参数都可省略：默认今天、本机时区。模型给错时（比如 <code>date="下周一"</code>、<code>timezone="北京时间"</code>），工具<strong>返回一句解释文本</strong>，而不是抛异常：</p>
+  <pre><code>无法识别的日期：下周一。请使用 today、tomorrow 或 YYYY-MM-DD。</code></pre>
+
+  <div class="note">
+    <span class="label">为什么不是直接抛异常</span>
+    参数错误是"模型可以自己纠正"的错误。把原因作为工具结果回填，模型下一轮就能换成合法参数；抛异常则要等 loop 兜底，模型不一定知道错在哪。
+    <br>当然，真正的运行时异常（网络、代码 bug）仍然应该抛出去，交给 T18 的 loop 统一处理。
+  </div>
+
+  <h3>时区怎么处理</h3>
+  <p>用标准库 <code>zoneinfo.ZoneInfo</code> 解析 IANA 名称；不传时区就用本机时区：</p>
+  <pre><code>if not timezone_name:
+    return datetime.now().astimezone()
+try:
+    return datetime.now(ZoneInfo(timezone_name))
+except (ZoneInfoNotFoundError, ValueError):
+    return None   # 由调用方转成"无法识别的时区"文本</code></pre>
+  <p class="muted">Windows 上没有系统时区库时，<code>ZoneInfo</code> 可能需要 <code>tzdata</code> 包；本项目默认用本机时区，不引入新依赖。</p>
+
+  <h2>四、知识库工具：工厂 + 依赖注入</h2>
+  <p>工具需要 <code>RAGPipeline</code> 才能检索。这个依赖不能写死在模块里，所以用工厂：</p>
+  <pre><code>def build_kb_tool(pipeline: RAGPipeline, max_chars: int = 2000) -&gt; Tool:
+    @tool(name="search_knowledge_base", ...)
+    def search_knowledge_base(args: dict) -&gt; ToolResult:
+        _, used = pipeline.retrieve(query, None)
+        ...</code></pre>
+
+  <table>
+    <thead><tr><th>写法</th><th>问题</th></tr></thead>
+    <tbody>
+      <tr><td>模块级全局 <code>pipeline</code></td><td>应用装配顺序一变就拿到 None；测试时无法注入替身</td></tr>
+      <tr><td>工具内部自己 new 一个 pipeline</td><td>重复初始化索引/客户端，配置不一致，测试要真调外部接口</td></tr>
+      <tr><td><strong>工厂参数注入（本课）</strong></td><td>依赖显式、可替换、可测试</td></tr>
+    </tbody>
+  </table>
+
+  <h2>五、绝不重写检索</h2>
+  <p>工具内部只有一行核心逻辑：</p>
+  <pre><code>_, used = pipeline.retrieve(query, None)</code></pre>
+  <p>召回、重排、降级、日志全都在 <code>pipeline</code> 里。工具层如果自己再写一遍检索，会出现两套参数、两套行为，消融实验也就失去意义。</p>
+  <p>这正是"薄工具层"的含义：<strong>工具负责翻译（模型参数 → 现有能力），不负责重新实现能力。</strong></p>
+
+  <h2>六、编号就是引用契约</h2>
+  <p>返回文本的格式：</p>
+  <pre><code>[1] 个人知识库验证文档.md#0000（分数=0.9765）
+&lt;片段前 300 字&gt;
+
+[2] 个人知识库验证文档.md#0001（分数=0.3678）
+&lt;片段前 300 字&gt;</code></pre>
+
+  <div class="diagram">
+    <div class="dbox"><strong>used[0]</strong><span>rerank 第 1 名</span></div>
+    <div class="darrow">↓ 工具输出编号 [1]</div>
+    <div class="dbox"><strong>模型回答里的 [1]</strong><span>指向 used[0]</span></div>
+    <div class="darrow">↓ 前端/评测按编号反查</div>
+    <div class="dbox lead"><strong>用户看到原文</strong><span>可溯源</span></div>
+    <div class="dcap">图 1 · 编号顺序 = used 顺序，绝不能重排</div>
+  </div>
+
+  <p>这与 <code>prompts.format_context</code> 的编号规则一致：<code>[n]</code> 永远对应 <code>used[n-1]</code>。工具层只按顺序枚举，不排序、不去重、不跳号。</p>
+
+  <h2>七、截断：两道保险</h2>
+  <ul>
+    <li><strong>单条片段 ≤ 300 字</strong>：完整 chunk 可能有 500 字，4 条就会把上下文撑大。</li>
+    <li><strong>总结果 ≤ <code>AGENT_TOOL_RESULT_MAX_CHARS</code>（默认 2000）</strong>：这是 §19.13 的硬上限，超了就截断。</li>
+  </ul>
+  <p>为什么截断放在工具层、T18 的 loop 里还要再做一次？工具层知道自己返回的是什么，可以<strong>截得更好看</strong>（比如保留每条编号）；loop 的截断是最后一道保险，防止任何工具忘记处理。</p>
+
+  <h2>八、空库 / 无命中</h2>
+  <pre><code>if not selected:
+    return ToolResult(text="未检索到相关资料。")</code></pre>
+  <p>空库不是错误，是正常结果。模型看到这句话，可以如实告诉用户"资料里没有"，而不是让整个请求失败。</p>
+
+  <h2>九、日志</h2>
+  <pre><code>工具执行 search_knowledge_base 参数={'query': '...'} 成功=True 命中=2 结果长度=674 耗时=1359ms</code></pre>
+  <p>按 §19.13，每个工具都要打：<strong>工具名、参数（截断）、成功/失败、结果长度、耗时</strong>。参数只保留前 80 字符，避免长 query 淹没日志。</p>
+
+  <h2>十、实测数据</h2>
+  <table>
+    <thead><tr><th>验收点</th><th>实测</th></tr></thead>
+    <tbody>
+      <tr><td><code>get_datetime</code> 默认</td><td>✅ 2026-10-18 / 星期日 / 11:05:02 / 今天（+0 天）</td></tr>
+      <tr><td><code>get_datetime</code> 传 tomorrow</td><td>✅ 2026-10-19 / 星期一 / 明天（+1 天）</td></tr>
+      <tr><td><code>search_knowledge_base</code></td><td>✅ 6 chunk 索引；top_n=2 → <code>[1] 文件#0000（分数=0.9765）</code>、<code>[2] #0001（0.3678）</code>；结果 674 字</td></tr>
+      <tr><td>空库</td><td>✅ 返回「未检索到相关资料。」（9 字），无异常</td></tr>
+      <tr><td>长度上限</td><td>✅ 674 ≤ 2000</td></tr>
+      <tr><td>日志打点</td><td>✅ 参数、命中数、结果长度、耗时齐全</td></tr>
+    </tbody>
+  </table>
+
+  <h2>十一、亲手做一遍</h2>
+
+  <div class="note">
+    <span class="label">练习 A · 自己核对星期</span>
+    调 <code>get_datetime</code> 拿今天的日期，再用 Python 的 <code>date.weekday()</code> 自己算一遍，确认工具的星期没写错。
+  </div>
+
+  <div class="note">
+    <span class="label">练习 B · 制造参数错误</span>
+    分别传 <code>{"date": "下周一"}</code> 和 <code>{"timezone": "北京时间"}</code>。观察返回文本，而不是异常。
+  </div>
+
+  <div class="note">
+    <span class="label">练习 C · 验证编号</span>
+    用 <code>top_n=4</code> 检索，然后对比 <code>pipeline.retrieve</code> 返回的 <code>used</code> 列表：确认工具输出的 <code>[1]</code> 就是 <code>used[0]</code>。
+  </div>
+
+  <div class="note">
+    <span class="label">练习 D · 空库</span>
+    指向一个空的 <code>data</code> 目录建 pipeline，再调检索工具。确认返回 <code>未检索到相关资料。</code>，且日志里 <code>命中=0</code>。
+  </div>
+
+  <h2>十二、自测（凭记忆答）</h2>
+
+  <div class="quiz" data-answer="a">
+    <p class="q">1. 为什么"今天星期几"要让工具算，而不是让模型回答？</p>
+    <button class="quiz-option" data-key="a">模型没有时钟，也没有可信的当前日期</button>
+    <button class="quiz-option" data-key="b">模型不会输出中文星期</button>
+    <button class="quiz-option" data-key="c">工具算出来的答案 token 更少</button>
+    <button class="quiz-option" data-key="d">提示词里禁止模型回答日期问题</button>
+    <p class="feedback"
+       data-correct="对。日期是实时事实，模型只能猜；工具能给出确定答案。"
+       data-wrong="再想想：这不是语言能力问题，是「模型没有时钟」。"></p>
+  </div>
+
+  <div class="quiz" data-answer="a">
+    <p class="q">2. 知识库工具为什么用 <code>build_kb_tool(pipeline)</code> 工厂？</p>
+    <button class="quiz-option" data-key="a">把 pipeline 依赖显式注入，避免全局变量并方便测试</button>
+    <button class="quiz-option" data-key="b">因为 Python 不允许函数直接访问全局变量</button>
+    <button class="quiz-option" data-key="c">工厂能让工具执行速度更快</button>
+    <button class="quiz-option" data-key="d">只有工厂才能使用 @tool 装饰器</button>
+    <p class="feedback"
+       data-correct="对。依赖显式传入，装配顺序与测试都更可控。"
+       data-wrong="再想想：核心是依赖注入，不是语言限制或性能。"></p>
+  </div>
+
+  <div class="quiz" data-answer="a">
+    <p class="q">3. 工具输出里的 <code>[1]</code> 必须对应什么？</p>
+    <button class="quiz-option" data-key="a">used 列表的第 1 条（rerank 第 1 名）</button>
+    <button class="quiz-option" data-key="b">文件名排序后的第 1 个文档</button>
+    <button class="quiz-option" data-key="c">分数最高的 chunk，但可以自由重排</button>
+    <button class="quiz-option" data-key="d">用户问题里的第一个关键词</button>
+    <p class="feedback"
+       data-correct="对。编号顺序 = used 顺序，模型回答里的 [n] 才能反查回原文。"
+       data-wrong="再想想：编号是「模型引用」和「原文 chunk」之间的对照表。"></p>
+  </div>
+
+  <div class="quiz" data-answer="a">
+    <p class="q">4. 空库检索应该返回什么？</p>
+    <button class="quiz-option" data-key="a">"未检索到相关资料。" 文本，且不抛异常</button>
+    <button class="quiz-option" data-key="b">抛 KeyError，让 loop 记为失败步骤</button>
+    <button class="quiz-option" data-key="c">返回空字符串，让模型自己猜</button>
+    <button class="quiz-option" data-key="d">返回整个知识库的第一条内容</button>
+    <p class="feedback"
+       data-correct="对。空结果不是错误，模型可以据此如实回答「资料里没有」。"
+       data-wrong="再想想：T17 验收明确要求返回文本而不是异常。"></p>
+  </div>
+
+  <h2>十三、想深入时读这个</h2>
+  <p><strong>首选：</strong><a href="https://docs.python.org/zh-cn/3/library/zoneinfo.html">Python 官方文档 · zoneinfo</a>（官方中文）——IANA 时区数据库与 <code>ZoneInfo</code> 的用法。</p>
+  <p><strong>回顾：</strong><a href="0013-dependency-injection.html">课程 0013 · 依赖注入</a>——为什么依赖要"传进来"而不是"自己 new"。</p>
+  <p><strong>检索：</strong><a href="0011-how-to-write-t8.html">课程 0011 · 检索编排</a>——<code>retrieve</code> 的召回/重排两阶段与降级逻辑。</p>
+  <p class="muted">完整资源见 <a href="../RESOURCES.md">RESOURCES.md</a>。</p>
+
+  <div class="foot">
+    不清楚就直接问，比如"为什么工具结果要截断两次""时区为什么用 IANA 名称而不是 +8:00"。我是你的老师，问多基础都可以。
+  </div>
+
+</div>
+<script src="../assets/quiz.js"></script>
+</body>
+</html>

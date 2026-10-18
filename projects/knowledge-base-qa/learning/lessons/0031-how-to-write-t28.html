@@ -1,0 +1,134 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>课程 0031 · 同一份契约，两种编排：拆解 T28</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+<div class="wrap">
+
+  <p class="eyebrow">课程 0031 · Agent 化实战 · 对应任务 T28</p>
+  <h1>同一份契约，两种编排</h1>
+  <p class="lede">T18 用 while 写了 loop。T28 用 LangGraph 再写一遍：<strong>工具、skill、AgentRun 全部复用</strong>，只把"循环"换成状态图。这样对比才公平——差异只能来自编排方式。</p>
+
+  <div class="win">
+    <strong>学完你能做到：</strong>看懂 StateGraph 的 State / Node / Edge；说清条件边如何表达"有工具就继续、没有就结束"；并理解为什么两版要共用同一套工具与契约。
+    <br><span class="muted">配套：<a href="../reference/python-concepts-glossary.html">术语表</a> · 前置 <a href="0021-how-to-write-t18.html">课程 0021</a></span>
+  </div>
+
+  <h2>一、图长什么样</h2>
+  <div class="diagram">
+    <div class="dbox"><strong>llm 节点</strong><span>调模型，产出 pending_calls</span></div>
+    <div class="darrow">↓ 条件边</div>
+    <div class="dbox"><strong>tools 节点</strong><span>执行工具，回填 messages</span></div>
+    <div class="darrow">↺ 回到 llm</div>
+    <div class="dbox lead"><strong>END</strong><span>模型不再请求工具 / 达到上限</span></div>
+    <div class="dcap">图 1 · 和 while 循环是同一件事，只是换了表达方式</div>
+  </div>
+
+  <h2>二、四个核心概念</h2>
+  <table>
+    <thead><tr><th>概念</th><th>在本项目里</th></tr></thead>
+    <tbody>
+      <tr><td><code>State</code></td><td><code>AgentState</code>：messages / steps / rounds / pending_calls / active_skill…</td></tr>
+      <tr><td>Node</td><td><code>llm_node</code>（调模型）、<code>tools_node</code>（执行工具）</td></tr>
+      <tr><td>Edge</td><td><code>tools → llm</code>；<code>llm → tools 或 END</code>（条件边）</td></tr>
+      <tr><td><code>recursion_limit</code></td><td>图的执行上限，作为 <code>max_steps</code> 之外的保险</td></tr>
+    </tbody>
+  </table>
+
+  <h2>三、关键设计：继承手写版</h2>
+  <pre><code>class GraphAgentRunner(AgentRunner):
+    def run(...):
+        active_skill = self._resolve_skill(skill)
+        ...
+        final = graph.invoke(initial, config={"recursion_limit": max_steps * 2 + 4})</code></pre>
+  <p>继承不是为了复用循环，而是复用<strong>循环之外</strong>的一切：skill 解析、工具执行、截断、重复检测、日志。这样两版的差异只剩图本身。</p>
+
+  <h2>四、条件边怎么写</h2>
+  <pre><code>def route(state):
+    return "tools" if state["pending_calls"] else "end"
+
+graph.add_conditional_edges("llm", route, {"tools": "tools", "end": END})
+graph.add_edge("tools", "llm")</code></pre>
+  <p><code>llm_node</code> 里如果模型不再请求工具，就把 <code>pending_calls</code> 置空并设置 <code>stop_reason</code>；条件边看到空列表就走向 END。</p>
+
+  <h2>五、延迟导入</h2>
+  <pre><code>if engine == "langgraph":
+    from kbqa.agent_graph import GraphAgentRunner</code></pre>
+  <p><code>AGENT_ENGINE=handwritten</code> 时进程内不会加载 langgraph——实测 <code>"langgraph" not in sys.modules</code>。可选依赖不能变成必需依赖。</p>
+
+  <h2>六、实测数据</h2>
+  <table>
+    <thead><tr><th>验收点</th><th>实测</th></tr></thead>
+    <tbody>
+      <tr><td>真实问日期</td><td>✅ 2 轮 / 1 步 / 调 <code>get_datetime</code> / <code>final_answer</code></td></tr>
+      <tr><td>max_steps=3 且每轮都请求工具</td><td>✅ 停在 3 轮、2 步，不抛异常</td></tr>
+      <tr><td>工具必抛异常</td><td>✅ <code>ok=False</code>、继续到最终答案</td></tr>
+      <tr><td>3000 字结果</td><td>✅ 截到 2000 字</td></tr>
+      <tr><td>两版结构对齐</td><td>✅ 同脚本下 stop_reason / 步数 / 轮数 / 工具名一致</td></tr>
+      <tr><td>skill 收窄</td><td>✅ LangGraph 版同样只暴露该 skill 的 3 个工具</td></tr>
+      <tr><td>handwritten 模式不导入 langgraph</td><td>✅</td></tr>
+    </tbody>
+  </table>
+
+  <h2>七、亲手做一遍</h2>
+  <div class="note">
+    <span class="label">练习 A · 切换引擎</span>
+    设 <code>AGENT_ENGINE=langgraph</code>，重启服务，确认日志出现 <code>agent(langgraph)</code>，接口行为不变。
+  </div>
+  <div class="note">
+    <span class="label">练习 B · 画图</span>
+    把 <code>_build_graph</code> 的节点与边画在纸上，再用同一张图解释 while 版的三个分支（无工具 / 有工具 / 超步数）。
+  </div>
+  <div class="note">
+    <span class="label">练习 C · 删掉一条边</span>
+    临时去掉 <code>tools → llm</code>，观察图会怎么结束。想清楚：控制流为什么必须闭环？
+  </div>
+
+  <h2>八、自测（凭记忆答）</h2>
+  <div class="quiz" data-answer="a">
+    <p class="q">1. LangGraph 版与手写版最大的共同点是什么？</p>
+    <button class="quiz-option" data-key="a">共用同一套工具、skill 与 AgentRun 契约</button>
+    <button class="quiz-option" data-key="b">共用同一个 while 循环</button>
+    <button class="quiz-option" data-key="c">都依赖 langgraph</button>
+    <button class="quiz-option" data-key="d">都不需要工具注册表</button>
+    <p class="feedback"
+       data-correct="对。控制变量：差异只能来自编排。"
+       data-wrong="再想想：如果工具实现不同，对比就失去意义。"></p>
+  </div>
+  <div class="quiz" data-answer="a">
+    <p class="q">2. 条件边的判断依据是什么？</p>
+    <button class="quiz-option" data-key="a">pending_calls 是否为空</button>
+    <button class="quiz-option" data-key="b">messages 长度</button>
+    <button class="quiz-option" data-key="c">当前时间</button>
+    <button class="quiz-option" data-key="d">工具注册表的顺序</button>
+    <p class="feedback"
+       data-correct="对。有工具请求就去 tools，否则 END。"
+       data-wrong="再想想：条件边读的是状态里的待执行调用。"></p>
+  </div>
+  <div class="quiz" data-answer="a">
+    <p class="q">3. 为什么要延迟导入 langgraph？</p>
+    <button class="quiz-option" data-key="a">让 handwritten 模式不依赖可选包</button>
+    <button class="quiz-option" data-key="b">让图执行得更快</button>
+    <button class="quiz-option" data-key="c">避免 AgentRun 字段变化</button>
+    <button class="quiz-option" data-key="d">因为 Python 不允许顶层 import</button>
+    <p class="feedback"
+       data-correct="对。可选依赖不能变成必需依赖。"
+       data-wrong="再想想：这是依赖边界，不是性能或语法限制。"></p>
+  </div>
+
+  <h2>九、想深入时读这个</h2>
+  <p><strong>LangGraph 官方仓库：</strong><a href="https://github.com/langchain-ai/langgraph">github.com/langchain-ai/langgraph</a>（英文）——StateGraph、节点、边、持久化。</p>
+  <p><strong>本课代码：</strong><a href="../../kbqa/agent_graph.py">kbqa/agent_graph.py</a> · <a href="../../kbqa/agent.py">kbqa/agent.py</a></p>
+
+  <div class="foot">
+    不清楚就直接问，比如"StateGraph 和普通函数调用差在哪""recursion_limit 和 max_steps 有什么区别"。我是你的老师，问多基础都可以。
+  </div>
+
+</div>
+<script src="../assets/quiz.js"></script>
+</body>
+</html>

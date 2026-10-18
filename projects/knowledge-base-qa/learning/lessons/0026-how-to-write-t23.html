@@ -1,0 +1,124 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>课程 0026 · 城市名不是经纬度：拆解 T23</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+<div class="wrap">
+
+  <p class="eyebrow">课程 0026 · Agent 化实战 · 对应任务 T23</p>
+  <h1>城市名不是经纬度</h1>
+  <p class="lede">T23 是天气工具。它和 T22 共享同一套外网工具骨架，但有一个关键设计：<strong>参数用城市名，不用经纬度</strong>。因为模型更会给"北京"，而不是"39.9, 116.4"。</p>
+
+  <div class="win">
+    <strong>学完你能做到：</strong>理解工具参数要"顺着模型的表达习惯"；处理"城市不存在"这类业务错误；并复用 mock-first + 超时 + 错误文本的三件套。
+    <br><span class="muted">配套：<a href="../reference/python-concepts-glossary.html">术语表</a> · 前置 <a href="0025-how-to-write-t22.html">课程 0025</a></span>
+  </div>
+
+  <h2>一、工具契约</h2>
+  <table>
+    <thead><tr><th>项</th><th>约定</th></tr></thead>
+    <tbody>
+      <tr><td>名称</td><td><code>get_weather</code></td></tr>
+      <tr><td>参数</td><td><code>city</code> 必填（城市名）；<code>days</code> 1–7，默认 1</td></tr>
+      <tr><td>返回</td><td>城市 / 日期 / 天气 / 温度</td></tr>
+      <tr><td>失败</td><td>城市不存在或外网失败 → 返回错误文本，不抛异常</td></tr>
+      <tr><td>超时</td><td>10 秒</td></tr>
+      <tr><td>配置</td><td><code>WEATHER_ENDPOINT</code> / <code>WEATHER_API_KEY</code></td></tr>
+    </tbody>
+  </table>
+
+  <h2>二、为什么参数是城市名</h2>
+  <p>模型对"北京"的把握，远高于"39.9042, 116.4074"。工具参数应该顺着模型的表达习惯设计，而不是顺着后端 API 的习惯。</p>
+  <div class="note">
+    <span class="label">设计原则</span>
+    <strong>参数面向模型，不面向数据库。</strong>如果后端需要经纬度，就在工具内部把城市名转成坐标（或交给天气 API 自己转），不要让模型承担这个转换。
+  </div>
+
+  <h2>三、mock 模式如何模拟"城市不存在"</h2>
+  <pre><code>_MOCK_CITIES = {"北京": ("晴", "18~25°C"), "上海": (...), ...}
+
+if city not in _MOCK_CITIES:
+    return ToolResult(text=f"未找到城市：{city} 的天气信息。")</code></pre>
+  <p>mock 只认识一个小城市表，其它城市按"不存在"处理。这样错误路径也能被验收，而不是永远返回一段假天气。</p>
+
+  <h2>四、输出格式</h2>
+  <pre><code>城市：北京（mock）
+
+日期：2026-10-18
+天气：晴
+温度：18~25°C</code></pre>
+  <p>三个字段分行，模型能直接引用。`days > 1` 时按天重复"日期/天气/温度"块。</p>
+
+  <h2>五、实测数据</h2>
+  <table>
+    <thead><tr><th>验收点</th><th>实测</th></tr></thead>
+    <tbody>
+      <tr><td>北京 2 天</td><td>✅ 城市 / 日期 / 天气 / 温度齐全，明确标注 mock</td></tr>
+      <tr><td>不存在的城市</td><td>✅ 返回「未找到城市：…」，不抛异常</td></tr>
+      <tr><td>错误 endpoint</td><td>✅ 返回「get_weather 调用失败：…」，不抛异常（2566ms）</td></tr>
+      <tr><td>真实联调</td><td>⚠️ 未联调（无 Key / endpoint）</td></tr>
+    </tbody>
+  </table>
+
+  <h2>六、亲手做一遍</h2>
+  <div class="note">
+    <span class="label">练习 A · 加一个城市</span>
+    在 <code>_MOCK_CITIES</code> 里加"苏州"，确认 mock 能返回；再把 <code>days</code> 设为 3，看输出是否重复三块。
+  </div>
+  <div class="note">
+    <span class="label">练习 B · 改参数设计</span>
+    如果后端只接受经纬度，你会在工具的哪一层做"城市 → 坐标"的转换？为什么不把这个转换交给模型？
+  </div>
+  <div class="note">
+    <span class="label">练习 C · 超时验证</span>
+    把 endpoint 指向不响应地址，确认 10 秒后返回错误文本。想一想：如果模型正在等这个工具，10 秒是不是可接受？
+  </div>
+
+  <h2>七、自测（凭记忆答）</h2>
+  <div class="quiz" data-answer="a">
+    <p class="q">1. 天气工具为什么用城市名而不是经纬度？</p>
+    <button class="quiz-option" data-key="a">模型更容易给出城市名，参数应顺着模型表达习惯</button>
+    <button class="quiz-option" data-key="b">经纬度会让 JSON 变得更长</button>
+    <button class="quiz-option" data-key="c">城市名能自动提高天气准确率</button>
+    <button class="quiz-option" data-key="d">天气 API 不支持经纬度</button>
+    <p class="feedback"
+       data-correct="对。参数是模型与你之间的接口，不是数据库字段。"
+       data-wrong="再想想：核心是降低模型出错概率，不是 API 限制。"></p>
+  </div>
+  <div class="quiz" data-answer="a">
+    <p class="q">2. 城市不存在时应该返回什么？</p>
+    <button class="quiz-option" data-key="a">明确的错误文本，不抛异常</button>
+    <button class="quiz-option" data-key="b">任意城市的天气</button>
+    <button class="quiz-option" data-key="c">空字符串</button>
+    <button class="quiz-option" data-key="d">HTTP 500</button>
+    <p class="feedback"
+       data-correct="对。模型看到原因后才能如实告诉用户或换参数。"
+       data-wrong="再想想：工具失败不该毁掉整次对话。"></p>
+  </div>
+  <div class="quiz" data-answer="a">
+    <p class="q">3. mock 结果为什么要标注来源？</p>
+    <button class="quiz-option" data-key="a">避免把假数据当成真实联调结果</button>
+    <button class="quiz-option" data-key="b">模型只认识 mock 这个词</button>
+    <button class="quiz-option" data-key="c">标注后会自动切到真实接口</button>
+    <button class="quiz-option" data-key="d">不标注会触发 HTTP 429</button>
+    <p class="feedback"
+       data-correct="对。这和第 0025 课是同一条纪律：联调状态必须如实记录。"
+       data-wrong="再想想：标注是给人看的，不是协议要求。"></p>
+  </div>
+
+  <h2>八、想深入时读这个</h2>
+  <p><strong>本课代码：</strong><a href="../../kbqa/tools/weather.py">weather.py</a></p>
+  <p><strong>回顾：</strong><a href="0025-how-to-write-t22.html">课程 0025 · web_search</a></p>
+
+  <div class="foot">
+    不清楚就直接问，比如"预报天数应该默认几天""为什么不用定位自动获取城市"。我是你的老师，问多基础都可以。
+  </div>
+
+</div>
+<script src="../assets/quiz.js"></script>
+</body>
+</html>

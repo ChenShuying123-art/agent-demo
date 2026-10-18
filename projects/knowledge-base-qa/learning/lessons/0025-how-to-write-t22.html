@@ -1,0 +1,133 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>课程 0025 · 外网工具先跑通链路：拆解 T22</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+<div class="wrap">
+
+  <p class="eyebrow">课程 0025 · Agent 化实战 · 对应任务 T22</p>
+  <h1>外网工具先跑通链路</h1>
+  <p class="lede">T22 是百度搜索工具。真实接口还没定稿、也没有 Key，所以这一课的重点不是"接上百度"，而是<strong>把外网工具的正确形状先定下来</strong>：可配置 endpoint、10 秒超时、失败返回文本、mock 明确标注、绝不打印 Key。</p>
+
+  <div class="win">
+    <strong>学完你能做到：</strong>说清"mock-first"为什么不是偷懒；写出一个失败不炸链路的外网工具；并知道真实联调状态必须如实记录。
+    <br><span class="muted">配套：<a href="../reference/python-concepts-glossary.html">术语表</a> · 前置 <a href="0020-how-to-write-t17.html">课程 0020</a></span>
+  </div>
+
+  <h2>一、工具契约</h2>
+  <table>
+    <thead><tr><th>项</th><th>约定</th></tr></thead>
+    <tbody>
+      <tr><td>名称</td><td><code>web_search</code></td></tr>
+      <tr><td>参数</td><td><code>query</code> 必填；<code>count</code> 1–5，默认 3</td></tr>
+      <tr><td>返回</td><td>每条"标题 + URL + 摘要（≤200 字）"，最多 5 条</td></tr>
+      <tr><td>失败</td><td>返回错误文本，<strong>不抛异常</strong></td></tr>
+      <tr><td>超时</td><td>10 秒</td></tr>
+      <tr><td>配置</td><td><code>WEB_SEARCH_ENDPOINT</code> / <code>WEB_SEARCH_API_KEY</code></td></tr>
+    </tbody>
+  </table>
+
+  <h2>二、为什么先 mock</h2>
+  <p>真实接口用哪家、鉴权方式、返回字段都还没定（§19.16）。如果现在硬接一个猜的接口，后面一定返工；更糟的是，<strong>把 mock 数据当成联调成功写进报告</strong>。</p>
+  <div class="note">
+    <span class="label">mock-first 的正确姿势</span>
+    ① 输出里明确写 <code>[mock]</code>；② 日志打 <code>WARNING</code> 并标注"未联调"；③ 报告里写"未联调"，而不是"通过"。<br>
+    这样链路、参数、错误处理都能先验证，真实接口一到位只替换 HTTP 那一段。
+  </div>
+
+  <h2>三、可替换的 HTTP 契约</h2>
+  <pre><code>GET {WEB_SEARCH_ENDPOINT}?q=...&count=...
+Authorization: Bearer {WEB_SEARCH_API_KEY}
+
+响应（任选其一即可适配）：
+{"references": [{"title","url","snippet"}]}
+{"results":    [{"title","url","summary"}]}
+{"data":       [{"title","link","content"}]}</code></pre>
+  <p>解析时统一成 <code>title / url / snippet</code>，这样换供应商只改 endpoint 与少量字段映射。</p>
+
+  <h2>四、失败路径比成功路径更重要</h2>
+  <pre><code>except Exception as exc:
+    text = f"web_search 调用失败：{exc}"
+    return ToolResult(text=text, data={"query": query, "results": []})</code></pre>
+  <p>外网一定会抖。工具层把异常转成文本，agent loop 就能把它当作一次普通工具结果继续；如果直接抛，虽然 loop 也会兜住，但错误信息不如这里可读。</p>
+
+  <h2>五、Key 安全</h2>
+  <ul>
+    <li>Key 只从 <code>.env</code> 读，不写进代码；</li>
+    <li>日志只打 query / count / 来源 / 成功率 / 耗时，<strong>绝不打 Key</strong>；</li>
+    <li>错误文本里也不拼 Key（异常信息通常只有 URL 与状态码）。</li>
+  </ul>
+
+  <h2>六、实测数据</h2>
+  <table>
+    <thead><tr><th>验收点</th><th>实测</th></tr></thead>
+    <tbody>
+      <tr><td>mock 搜索 3 条</td><td>✅ 每条含标题 / URL / 摘要，带 <code>[mock]</code>，结果 514 字</td></tr>
+      <tr><td>错误 endpoint</td><td>✅ 返回「web_search 调用失败：…」，不抛异常（2750ms）</td></tr>
+      <tr><td>Key 是否进日志</td><td>✅ 日志无 Key（仅 query / count / 来源 / 结果长度 / 耗时）</td></tr>
+      <tr><td>真实联调</td><td>⚠️ 未联调（无 Key / endpoint），mock 结果已明确标注</td></tr>
+    </tbody>
+  </table>
+
+  <h2>七、亲手做一遍</h2>
+  <div class="note">
+    <span class="label">练习 A · 换一种响应形状</span>
+    把 <code>_parse_response</code> 改成适配 <code>{"data":[{"link","content"}]}</code>，用本地 mock 服务器返回，确认字段映射生效。
+  </div>
+  <div class="note">
+    <span class="label">练习 B · 制造超时</span>
+    把 endpoint 指向一个不响应的地址，确认 10 秒后返回错误文本而不是卡死。
+  </div>
+  <div class="note">
+    <span class="label">练习 C · 检查日志脱敏</span>
+    故意把 Key 设成一个显眼字符串，跑一次失败路径，搜索日志确认它没有出现。
+  </div>
+
+  <h2>八、自测（凭记忆答）</h2>
+  <div class="quiz" data-answer="a">
+    <p class="q">1. 为什么 mock 结果要标注 <code>[mock]</code>？</p>
+    <button class="quiz-option" data-key="a">避免把假数据误当成真实联调结果</button>
+    <button class="quiz-option" data-key="b">因为模型只认识带方括号的文本</button>
+    <button class="quiz-option" data-key="c">标注后接口会自动切换到真实数据</button>
+    <button class="quiz-option" data-key="d">不标注会触发 HTTP 400</button>
+    <p class="feedback"
+       data-correct="对。诚实标注是 mock-first 的底线。"
+       data-wrong="再想想：模型并不依赖这个标记，标记是给人看的。"></p>
+  </div>
+  <div class="quiz" data-answer="a">
+    <p class="q">2. 外网工具失败时应该怎么做？</p>
+    <button class="quiz-option" data-key="a">返回错误文本，让 loop 继续</button>
+    <button class="quiz-option" data-key="b">直接终止整个请求并返回 500</button>
+    <button class="quiz-option" data-key="c">无限重试直到成功</button>
+    <button class="quiz-option" data-key="d">返回空字符串，让模型自己猜</button>
+    <p class="feedback"
+       data-correct="对。错误文本是模型可消费的结果，不是链路终止信号。"
+       data-wrong="再想想：外网抖动是常态，不能让它毁掉一次对话。"></p>
+  </div>
+  <div class="quiz" data-answer="a">
+    <p class="q">3. 工具日志里绝对不能出现什么？</p>
+    <button class="quiz-option" data-key="a">API Key / 完整请求头</button>
+    <button class="quiz-option" data-key="b">查询词</button>
+    <button class="quiz-option" data-key="c">结果长度</button>
+    <button class="quiz-option" data-key="d">耗时</button>
+    <p class="feedback"
+       data-correct="对。Key 泄露比功能失败严重得多。"
+       data-wrong="再想想：query 可以打（截断），Key 永远不行。"></p>
+  </div>
+
+  <h2>九、想深入时读这个</h2>
+  <p><strong>httpx 官方文档：</strong><a href="https://www.python-httpx.org/">HTTPX</a>（英文，无官方中文）——timeout、headers、异常类型。</p>
+  <p><strong>本课代码：</strong><a href="../../kbqa/tools/web_search.py">web_search.py</a></p>
+
+  <div class="foot">
+    不清楚就直接问，比如"timeout 应该设在连接还是读取""为什么不在工具里重试"。我是你的老师，问多基础都可以。
+  </div>
+
+</div>
+<script src="../assets/quiz.js"></script>
+</body>
+</html>

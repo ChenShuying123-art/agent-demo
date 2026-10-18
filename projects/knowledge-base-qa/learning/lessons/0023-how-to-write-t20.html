@@ -1,0 +1,139 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>课程 0023 · 把轨迹画出来：拆解 T20</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+<div class="wrap">
+
+  <p class="eyebrow">课程 0023 · Agent 化实战 · 对应任务 T20</p>
+  <h1>把轨迹画出来</h1>
+  <p class="lede">T19 已经把 <code>steps</code> 从接口吐出来了，但用户看不见。T20 只做展示：一个 Agent 面板 + 一个工具轨迹列表，把「模型刚才调了什么、成没成功、花了多久」摊开给人看。</p>
+
+  <div class="win">
+    <strong>学完你能做到：</strong>理解 <code>AgentRunOut → App 状态 → 展示组件</code> 的数据流；说清"展示组件不发网络请求"的分工；并知道失败步骤为什么要默认展开。
+    <br><span class="muted">配套：<a href="../reference/python-concepts-glossary.html">术语表</a> · 前置 <a href="0022-how-to-write-t19.html">课程 0022</a></span>
+  </div>
+
+  <h2>一、T20 增加了什么</h2>
+  <table>
+    <thead><tr><th>文件</th><th>职责</th></tr></thead>
+    <tbody>
+      <tr><td><code>web/src/api.ts</code></td><td>新增 <code>AgentStep</code> / <code>AgentRun</code> / <code>SkillInfo</code> 类型与两个请求方法</td></tr>
+      <tr><td><code>AgentPanel.vue</code></td><td>问题输入、skill 下拉、答案与整体指标</td></tr>
+      <tr><td><code>ToolTrace.vue</code></td><td>逐条渲染 <code>steps</code>，失败标红</td></tr>
+      <tr><td><code>App.vue</code></td><td>持有 agent 结果与 skill 列表，统一发请求</td></tr>
+    </tbody>
+  </table>
+
+  <h2>二、数据流</h2>
+  <div class="diagram">
+    <div class="dbox"><strong>POST /api/agent/chat</strong><span>返回 AgentRunOut</span></div>
+    <div class="darrow">↓</div>
+    <div class="dbox"><strong>App.vue</strong><span>agentResult / skills 两个 ref</span></div>
+    <div class="darrow">↓ props</div>
+    <div class="dbox"><strong>AgentPanel</strong><span>答案 + 指标 + 轨迹</span></div>
+    <div class="darrow">↓ props</div>
+    <div class="dbox lead"><strong>ToolTrace</strong><span>只渲染 steps</span></div>
+    <div class="dcap">图 1 · 网络调用只在 App 一处，展示组件保持无状态</div>
+  </div>
+
+  <h2>三、组件分工</h2>
+  <table>
+    <thead><tr><th>组件</th><th>负责</th><th>不负责</th></tr></thead>
+    <tbody>
+      <tr><td><code>AgentPanel</code></td><td>收集问题与 skill、发 <code>ask</code> 事件、展示答案/轮数/耗时</td><td>发请求、解析错误</td></tr>
+      <tr><td><code>ToolTrace</code></td><td>按 step 渲染序号、工具名、参数、结果、耗时、成败</td><td>编排、执行工具</td></tr>
+      <tr><td><code>App.vue</code></td><td>调用 <code>api.agentChat</code>、维护 busy/error</td><td>决定工具怎么调</td></tr>
+    </tbody>
+  </table>
+  <p>判断标准：删掉 AgentPanel，后端契约不变；删掉 ToolTrace，AgentPanel 只是少一块展示。</p>
+
+  <h2>四、两个细节</h2>
+
+  <h3>1. 失败步骤默认展开</h3>
+  <pre><code>&lt;details :open="!step.ok"&gt;</code></pre>
+  <p>成功的步骤折叠起来避免刷屏；失败步骤直接展开，用户第一眼就能看到错误文本。失败项同时加红色边框与红色徽章——颜色不是装饰，是让"异常"在长列表里跳出来。</p>
+
+  <h3>2. skill 下拉只有「自动」</h3>
+  <p>T26 之前后端 <code>/api/agent/skills</code> 返回空数组，所以下拉只有「自动」。组件不需要特判：<code>v-for</code> 渲染空列表即可，T26 之后自然出现选项。</p>
+
+  <h2>五、实测数据</h2>
+  <table>
+    <thead><tr><th>验收点</th><th>实测</th></tr></thead>
+    <tbody>
+      <tr><td>页面出现「5. Agent 对话」</td><td>✅ 输入框、Skill 下拉（默认「自动」）、按钮齐全</td></tr>
+      <tr><td>原有面板未受影响</td><td>✅ 上传 / 文档列表 / 提问三块均在</td></tr>
+      <tr><td>提问「今天几号？」</td><td>✅ 2 轮 · 1 次工具 · 2035 ms；答案「2026年10月18日，星期日」</td></tr>
+      <tr><td>工具轨迹</td><td>✅ <code>#1 get_datetime 成功 0 ms</code>，绿色徽章，展开可见参数与结果</td></tr>
+      <tr><td>构建</td><td>✅ <code>npm run type-check</code>、<code>npm run build</code> 均通过</td></tr>
+    </tbody>
+  </table>
+
+  <h2>六、亲手做一遍</h2>
+
+  <div class="note">
+    <span class="label">练习 A · 看一次失败轨迹</span>
+    临时把某个工具的 handler 改成抛异常，再问一个会触发它的问题。确认轨迹标红、默认展开，并且最终答案仍可能出现。
+  </div>
+
+  <div class="note">
+    <span class="label">练习 B · 加一个「复制轨迹」按钮</span>
+    在 ToolTrace 头部加一个按钮，把 <code>JSON.stringify(steps, null, 2)</code> 复制到剪贴板。想清楚：这属于展示逻辑还是编排逻辑？
+  </div>
+
+  <div class="note">
+    <span class="label">练习 C · 只改 props 改布局</span>
+    把 ToolTrace 从纵向列表改成两列网格，确认不需要动 api.ts 与后端。
+  </div>
+
+  <h2>七、自测（凭记忆答）</h2>
+
+  <div class="quiz" data-answer="a">
+    <p class="q">1. 为什么网络请求要放在 App.vue，而不是 AgentPanel 里？</p>
+    <button class="quiz-option" data-key="a">展示组件保持无状态，错误与 loading 逻辑只有一份</button>
+    <button class="quiz-option" data-key="b">因为 Vue 组件不能调用 fetch</button>
+    <button class="quiz-option" data-key="c">因为放在组件里会显著增加包体积</button>
+    <button class="quiz-option" data-key="d">因为后端只允许 App.vue 访问</button>
+    <p class="feedback"
+       data-correct="对。组件只发事件，App 统一处理网络与错误。"
+       data-wrong="再想想：这是分层与复用问题，不是框架限制。"></p>
+  </div>
+
+  <div class="quiz" data-answer="a">
+    <p class="q">2. 失败步骤为什么默认展开？</p>
+    <button class="quiz-option" data-key="a">让错误在长列表里第一眼可见</button>
+    <button class="quiz-option" data-key="b">因为折叠会导致浏览器崩溃</button>
+    <button class="quiz-option" data-key="c">因为成功步骤不允许展开</button>
+    <button class="quiz-option" data-key="d">因为 details 标签只能展开不能折叠</button>
+    <p class="feedback"
+       data-correct="对。成功可以折叠省空间，失败必须被看见。"
+       data-wrong="再想想：这是可观测性设计，不是技术限制。"></p>
+  </div>
+
+  <div class="quiz" data-answer="a">
+    <p class="q">3. ToolTrace 应该负责执行工具吗？</p>
+    <button class="quiz-option" data-key="a">不应该，它只渲染后端返回的 steps</button>
+    <button class="quiz-option" data-key="b">应该，否则模型不知道结果</button>
+    <button class="quiz-option" data-key="c">应该，这样能减少一次网络请求</button>
+    <button class="quiz-option" data-key="d">应该，前端执行工具更安全</button>
+    <p class="feedback"
+       data-correct="对。执行永远在 agent loop 里；前端只负责展示轨迹。"
+       data-wrong="再想想：前端执行工具会绕过后端的安全与日志边界。"></p>
+  </div>
+
+  <h2>八、想深入时读这个</h2>
+  <p><strong>Vue 官方中文文档：</strong><a href="https://cn.vuejs.org/guide/essentials/component-basics.html">组件基础</a>——props / emits / 单向数据流。</p>
+  <p><strong>本课代码：</strong><a href="../../web/src/components/AgentPanel.vue">AgentPanel.vue</a> · <a href="../../web/src/components/ToolTrace.vue">ToolTrace.vue</a> · <a href="../../web/src/App.vue">App.vue</a></p>
+
+  <div class="foot">
+    不清楚就直接问，比如"props 能不能被子组件修改""为什么 details 比自己写 v-if 更合适"。我是你的老师，问多基础都可以。
+  </div>
+
+</div>
+<script src="../assets/quiz.js"></script>
+</body>
+</html>

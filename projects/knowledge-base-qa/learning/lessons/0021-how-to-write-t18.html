@@ -1,0 +1,213 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>课程 0021 · 让循环跑起来：拆解 T18</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+<div class="wrap">
+
+  <p class="eyebrow">课程 0021 · Agent 化实战 · 对应任务 T18</p>
+  <h1>让循环跑起来</h1>
+  <p class="lede">T15 有工具表，T16 能读懂 tool_call，T17 有两个真工具。T18 把它们接成一个循环：<strong>调模型 → 执行工具 → 回填 → 再调模型</strong>，直到模型给答案，或者撞上步数上限。</p>
+
+  <div class="win">
+    <strong>学完你能做到：</strong>分清 while 与 for 各自管什么；说清 max_steps、工具异常、参数解析失败、重复调用这四条兜底；看懂 <code>AgentRun.steps</code> 为什么是前端轨迹与对照实验的共同数据源。
+    <br><span class="muted">配套：<a href="../reference/python-concepts-glossary.html">术语表</a> · 前置 <a href="0019-how-to-write-t16.html">课程 0019</a> / <a href="0020-how-to-write-t17.html">0020</a></span>
+  </div>
+
+  <h2>一、T18 在做什么</h2>
+  <table>
+    <thead><tr><th>文件</th><th>改动</th></tr></thead>
+    <tbody>
+      <tr><td><code>kbqa/models.py</code></td><td>新增 <code>AgentStep</code>、<code>AgentRun</code></td></tr>
+      <tr><td><code>kbqa/agent.py</code></td><td>新增 <code>AgentRunner.run</code>（手写 loop）</td></tr>
+      <tr><td><code>kbqa/config.py</code></td><td>新增 <code>AGENT_MAX_STEPS</code></td></tr>
+    </tbody>
+  </table>
+  <p>本任务<strong>不写 HTTP 路由、不接 MCP、不实现 skill</strong>。T18 只关心循环本身。</p>
+
+  <h2>二、循环骨架：while + for</h2>
+  <pre><code>while rounds &lt; max_steps:
+    rounds += 1
+    result = llm.chat_with_tools(messages, schemas)
+
+    if not result.tool_calls:          # 模型给答案了
+        stop_reason = "final_answer"
+        break
+
+    if rounds &gt;= max_steps:            # 最后一轮不再执行工具
+        stop_reason = "max_steps"
+        break
+
+    messages.append(assistant_message(result))
+    for call in result.tool_calls:     # 一轮可能多个工具
+        step = run_tool(call)
+        steps.append(step)
+        messages.append(tool_message(call.id, step.result_text))</code></pre>
+
+  <div class="diagram">
+    <div class="dbox"><strong>while</strong><span>还要不要再来一轮？轮数未知</span></div>
+    <div class="darrow">↓</div>
+    <div class="dbox"><strong>for · result.tool_calls</strong><span>这一轮模型点了几把工具</span></div>
+    <div class="darrow">↓</div>
+    <div class="dbox lead"><strong>registry.get(name)</strong><span>按名字查表，不用 if-else</span></div>
+    <div class="dcap">图 1 · 三个层次各管一件事，不要混</div>
+  </div>
+
+  <h2>三、状态都放在哪里</h2>
+  <table>
+    <thead><tr><th>变量</th><th>作用</th></tr></thead>
+    <tbody>
+      <tr><td><code>messages</code></td><td>完整对话：system → history → user → assistant(tool_calls) → tool…</td></tr>
+      <tr><td><code>steps</code></td><td>只记工具执行轨迹，供前端与对照实验读取</td></tr>
+      <tr><td><code>rounds</code></td><td>调了几次模型（不是工具次数）</td></tr>
+      <tr><td><code>tool_calls_count</code></td><td>实际执行了几次工具（含失败）</td></tr>
+      <tr><td><code>last_content</code></td><td>最后一次模型文本；max_steps 时可能是唯一能返回的内容</td></tr>
+      <tr><td><code>stop_reason</code></td><td>为什么停下：<code>final_answer</code> / <code>max_steps</code></td></tr>
+    </tbody>
+  </table>
+
+  <div class="note">
+    <span class="label">为什么 steps 和 messages 分开</span>
+    <code>messages</code> 是给模型看的（必须符合 OpenAI 协议）；<code>steps</code> 是给人看的（序号、耗时、成功失败）。
+    <strong>同一份事实，两种视图。</strong>前端轨迹面板只读 steps，不需要解析 messages。
+  </div>
+
+  <h2>四、四条兜底</h2>
+
+  <h3>1. max_steps：循环必须有上限</h3>
+  <p>模型可能一直要求调用工具。<code>AGENT_MAX_STEPS</code> 是刹车：到上限就停，<code>stop_reason="max_steps"</code>，<strong>不抛异常</strong>。</p>
+  <p>最后一轮即使模型还在申请工具，也<strong>不再执行</strong>——执行了也没有下一轮来消费结果。</p>
+
+  <h3>2. 工具异常：转成文本，继续循环</h3>
+  <pre><code>except Exception as exc:
+    ok = False
+    text = f"工具执行失败：{exc}"</code></pre>
+  <p>工具失败不是整个请求失败。把错误摘要回填给模型，它可以换工具、换参数，或者如实告诉用户。</p>
+
+  <h3>3. 参数不是合法 JSON</h3>
+  <p>模型偶尔会输出坏 JSON。这里<strong>不执行 handler</strong>，直接记：</p>
+  <pre><code>arguments = {"_raw": "&lt;模型原文&gt;"}
+result_text = "工具参数解析失败：..."</code></pre>
+  <p>轨迹里保留原文，方便排查"模型到底发了什么"。</p>
+
+  <h3>4. 重复调用：提醒模型换策略</h3>
+  <p>同一工具 + 同一参数连续出现 ≥ 2 次：</p>
+  <pre><code>text += "\n\n[提示] 你已连续重复调用同一工具与相同参数，请换一种策略。"</code></pre>
+  <p>这不会强制中断，而是把"你在原地打转"这个事实告诉模型。真正兜底仍然是 max_steps。</p>
+
+  <h2>五、截断必须严格</h2>
+  <p><code>steps[].result_text</code> 的长度必须 ≤ <code>AGENT_TOOL_RESULT_MAX_CHARS</code>。注意省略号也占字符：</p>
+  <pre><code>text[: limit - 3] + "..."   # 而不是 text[:limit] + "..."
+</code></pre>
+  <p>T17 的 kb 工具里也同步修了这个边界——否则刚好卡在上限时会超 3 个字符。</p>
+
+  <h2>六、日志：四类打点</h2>
+  <table>
+    <thead><tr><th>时机</th><th>内容</th></tr></thead>
+    <tbody>
+      <tr><td>开始</td><td>question（截断）、skill、工具数、max_steps</td></tr>
+      <tr><td>每轮</td><td>轮次、messages 数、是否带工具、finish_reason、耗时</td></tr>
+      <tr><td>每次工具</td><td>工具名、参数（截断）、成功失败、结果长度、耗时</td></tr>
+      <tr><td>结束</td><td>stop_reason、轮数、步数、工具调用次数、答案长度、总耗时</td></tr>
+    </tbody>
+  </table>
+  <p>失败额外打 <code>WARNING</code>；完整堆栈只在 <code>DEBUG</code>，避免 INFO 被淹没。</p>
+
+  <h2>七、实测数据</h2>
+  <table>
+    <thead><tr><th>验收点</th><th>实测</th></tr></thead>
+    <tbody>
+      <tr><td>问「今天是几号、星期几？」</td><td>✅ 2 轮 / 1 步 / 调 <code>get_datetime</code> / <code>final_answer</code>；答案「2026年10月18日，星期日」</td></tr>
+      <tr><td>模型每轮都要求再调一次</td><td>✅ 停在 <code>max_steps=5</code>，4 步后停止，不抛异常；返回兜底文本</td></tr>
+      <tr><td>工具必抛异常</td><td>✅ 该步 <code>ok=False</code>，<code>result_text="工具执行失败：故意失败"</code>，循环继续并给答案</td></tr>
+      <tr><td>超长结果</td><td>✅ 3000 字被截到 2000 字，严格 ≤ 上限</td></tr>
+      <tr><td>日志四类打点</td><td>✅ 开始 / 每轮 / 每次工具 / 结束齐全</td></tr>
+    </tbody>
+  </table>
+  <p class="muted">真实调用耗时：第 1 轮（请求工具）1191ms；第 2 轮（给答案）733ms；整次 1927ms。</p>
+
+  <h2>八、亲手做一遍</h2>
+
+  <div class="note">
+    <span class="label">练习 A · 数一数轮数与步数</span>
+    跑一次日期问题，打印 <code>rounds</code>、<code>len(steps)</code>、<code>tool_calls_count</code>。想清楚：为什么 rounds 会比 steps 多 1？
+  </div>
+
+  <div class="note">
+    <span class="label">练习 B · 制造一次工具失败</span>
+    注册一个 handler 必抛异常的工具，用一个假的 LLM 先请求它、再给最终答案。确认 <code>ok=False</code> 且循环没有中断。
+  </div>
+
+  <div class="note">
+    <span class="label">练习 C · 把 max_steps 改成 1</span>
+    把 <code>AGENT_MAX_STEPS</code> 调成 1，再问日期。观察：模型连一次工具都执行不了，<code>stop_reason=max_steps</code>。这说明了上限的语义。
+  </div>
+
+  <div class="note">
+    <span class="label">练习 D · 设计题</span>
+    如果模型一次返回两个 tool_calls，而第一个执行失败、第二个成功，messages 里应该有几条 <code>role="tool"</code> 消息？顺序重要吗？
+  </div>
+
+  <h2>九、自测（凭记忆答）</h2>
+
+  <div class="quiz" data-answer="a">
+    <p class="q">1. 外层 while 的退出条件是什么？</p>
+    <button class="quiz-option" data-key="a">模型不再请求工具，或达到 max_steps</button>
+    <button class="quiz-option" data-key="b">工具执行成功一次之后</button>
+    <button class="quiz-option" data-key="c">messages 长度超过 10 条之后</button>
+    <button class="quiz-option" data-key="d">模型返回的 content 为空字符串</button>
+    <p class="feedback"
+       data-correct="对。要么模型给出最终答案，要么刹车踩到底。"
+       data-wrong="再想想：content 为空可能只是模型在请求工具，不是结束条件。"></p>
+  </div>
+
+  <div class="quiz" data-answer="a">
+    <p class="q">2. 工具 handler 抛异常时，loop 应该怎么做？</p>
+    <button class="quiz-option" data-key="a">转成错误文本回填，该步 ok=False，继续循环</button>
+    <button class="quiz-option" data-key="b">立刻终止整个请求并返回 500</button>
+    <button class="quiz-option" data-key="c">忽略这个 tool_call，不回复任何消息</button>
+    <button class="quiz-option" data-key="d">重试同一个工具直到成功</button>
+    <p class="feedback"
+       data-correct="对。工具失败是运行时可能性，模型可以换策略或如实回答。"
+       data-wrong="再想想：直接终止会让一次工具故障毁掉整个对话。"></p>
+  </div>
+
+  <div class="quiz" data-answer="a">
+    <p class="q">3. 为什么最后一轮不再执行工具？</p>
+    <button class="quiz-option" data-key="a">执行了也没有下一轮模型调用来消费结果</button>
+    <button class="quiz-option" data-key="b">因为工具在最后一轮会自动失效</button>
+    <button class="quiz-option" data-key="c">因为执行工具会触发 Python 语法错误</button>
+    <button class="quiz-option" data-key="d">因为 max_steps 必须等于工具调用次数</button>
+    <p class="feedback"
+       data-correct="对。省下一次无意义的工具调用，直接按 max_steps 停止。"
+       data-wrong="再想想：循环已经用完，工具结果没有机会被模型看到。"></p>
+  </div>
+
+  <div class="quiz" data-answer="a">
+    <p class="q">4. 同一工具 + 同一参数连续出现时，为什么要提示模型？</p>
+    <button class="quiz-option" data-key="a">模型可能陷入原地打转，提示它换策略比直接报错更有效</button>
+    <button class="quiz-option" data-key="b">重复调用会触发 OpenAI 接口的封禁</button>
+    <button class="quiz-option" data-key="c">提示之后工具会自动切换实现</button>
+    <button class="quiz-option" data-key="d">重复调用说明工具注册表已经损坏</button>
+    <p class="feedback"
+       data-correct="对。先提醒，让模型自己纠正；max_steps 才是最后的刹车。"
+       data-wrong="再想想：这不是协议限制，也不是注册表问题。"></p>
+  </div>
+
+  <h2>十、想深入时读这个</h2>
+  <p><strong>协议回顾：</strong><a href="https://learn.microsoft.com/zh-cn/azure/foundry/openai/how-to/function-calling">Microsoft Learn · 如何使用函数调用</a>（官方中文）——tool_calls 与 role=tool 回填。</p>
+  <p><strong>项目实战：</strong><a href="https://help.aliyun.com/zh/model-studio/qwen-function-calling">阿里云百炼 · Function Calling</a>（官方中文）——Qwen 的多轮工具调用示例。</p>
+  <p><strong>本课代码：</strong><a href="../../kbqa/agent.py">kbqa/agent.py</a> · <a href="../../docs/spec-agent.md">spec-agent.md §19.8</a></p>
+
+  <div class="foot">
+    不清楚就直接问，比如"为什么 rounds 和 tool_calls_count 要分开统计""history 应该插在 system 前面还是后面"。我是你的老师，问多基础都可以。
+  </div>
+
+</div>
+<script src="../assets/quiz.js"></script>
+</body>
+</html>

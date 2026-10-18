@@ -1,0 +1,219 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>课程 0033 · 从一个工厂学会一类问题：工厂参数注入怎么举一反三</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+<div class="wrap">
+
+  <p class="eyebrow">课程 0033 · 概念迁移 · 由 T17 的 <code>build_kb_tool</code> 引出</p>
+  <h1>从一个工厂学会一类问题</h1>
+  <p class="lede">你已经看懂了 <code>build_kb_tool(pipeline, max_chars)</code> 这个例子。真正有价值的不是记住它，而是把它提炼成一个<strong>可以套用到任何项目上的模板</strong>：什么时候该注入、注入点放哪、在哪里装配、怎么用假实现验证。</p>
+
+  <div class="win">
+    <strong>学完你能做到：</strong>拿到任意一个"需要外部依赖"的新功能，按四步判断并写出工厂注入；同时能判断<strong>什么时候不该注入</strong>，避免为了模式而模式。
+    <br><span class="muted">配套：<a href="../reference/python-concepts-glossary.html">术语表</a> · 前置 <a href="0013-dependency-injection.html">课程 0013 · 依赖注入</a></span>
+  </div>
+
+  <h2>一、先把这个例子压缩成一行</h2>
+  <pre><code>build_kb_tool(pipeline, max_chars) -&gt; Tool
+# 依赖：pipeline（外部资源 / 共享实例）
+# 配置：max_chars（会随环境变化）
+# 产出：一个 handler 已被闭包绑定好依赖的 Tool</code></pre>
+  <p>它解决的不是"知识库检索"这个具体问题，而是：<strong>如何把一个需要依赖的函数，变成一个签名统一、可直接注册的工具。</strong></p>
+
+  <h2>二、提炼成通用模板</h2>
+  <pre><code>def build_X(dep_a, dep_b, config=默认值) -&gt; X:
+    def handler(args):
+        ...  # 用 dep_a / dep_b / config
+    return X(handler=handler, ...)</code></pre>
+  <table>
+    <thead><tr><th>位置</th><th>作用</th></tr></thead>
+    <tbody>
+      <tr><td>参数</td><td>注入点：外部资源、共享实例、配置</td></tr>
+      <tr><td>闭包</td><td>把依赖固定进 handler，之后调用方不需要再传</td></tr>
+      <tr><td>返回值</td><td>一个符合统一接口的成品（Tool / Service / Client）</td></tr>
+    </tbody>
+  </table>
+
+  <h2>三、四步迁移法</h2>
+
+  <h3>Step 1 · 识别依赖</h3>
+  <p>问自己：这个功能需要什么"不是它自己造"的东西？</p>
+  <ul>
+    <li>外部 IO：数据库、HTTP、文件、模型 API；</li>
+    <li>共享状态：同一个 store / 同一个 pipeline；</li>
+    <li>会变的实现：今天用百炼，明天换别的；</li>
+    <li>测试时需要替换：假 LLM、假时钟、假随机数；</li>
+    <li>配置：超时、上限、目录、Key。</li>
+  </ul>
+
+  <h3>Step 2 · 选注入点</h3>
+  <table>
+    <thead><tr><th>场景</th><th>注入方式</th><th>本项目例子</th></tr></thead>
+    <tbody>
+      <tr><td>函数要变成工具 / 回调</td><td>工厂参数 + 闭包</td><td><code>build_kb_tool(pipeline)</code></td></tr>
+      <tr><td>一个类需要多个依赖</td><td>构造函数参数</td><td><code>RAGPipeline(settings, store, embedder, ...)</code></td></tr>
+      <tr><td>整个应用共用一份</td><td>应用装配 / <code>app.state</code></td><td><code>app.state.pipeline / agent / skills</code></td></tr>
+      <tr><td>部署环境不同</td><td>环境变量 / Settings</td><td><code>DASHSCOPE_API_KEY</code> / <code>AGENT_MAX_STEPS</code></td></tr>
+      <tr><td>换实现</td><td>工厂函数 + 协议</td><td><code>get_llm(settings)</code> / <code>get_reranker(settings)</code></td></tr>
+    </tbody>
+  </table>
+
+  <h3>Step 3 · 在组合根装配</h3>
+  <p>组合根 = 唯一允许"自己 new"的地方，通常是 <code>main.py</code> / <code>create_app()</code>：</p>
+  <pre><code>pipeline = RAGPipeline(...)
+registry.register(build_kb_tool(pipeline, settings.agent_tool_result_max_chars))
+agent = create_agent_runner(settings, registry, llm, skills)</code></pre>
+  <p>把创建集中在一处，业务代码只接收成品。这样"谁依赖谁"一眼就能看完。</p>
+
+  <h3>Step 4 · 用假实现验证</h3>
+  <pre><code>class FakePipeline:
+    def retrieve(self, query, doc_ids):
+        return [], []
+
+tool = build_kb_tool(FakePipeline())
+assert tool.handler({"query": "任意问题"}).text == "未检索到相关资料。"</code></pre>
+  <p>如果换成"handler 内部自己 new pipeline"，这个测试就必须真的去连模型、读索引——慢、贵、还不稳定。</p>
+
+  <h2>四、判断表：该不该注入</h2>
+  <table>
+    <thead><tr><th>信号</th><th>该注入？</th></tr></thead>
+    <tbody>
+      <tr><td>会连接外部服务 / 读文件 / 调模型</td><td>✅ 是</td></tr>
+      <tr><td>测试时需要替换成假实现</td><td>✅ 是</td></tr>
+      <tr><td>多个地方必须共享同一个实例</td><td>✅ 是</td></tr>
+      <tr><td>存在第二个实现，或未来很可能有</td><td>✅ 是</td></tr>
+      <tr><td>纯函数、只依赖参数</td><td>❌ 否</td></tr>
+      <tr><td>标准库小工具、不会变</td><td>❌ 否</td></tr>
+      <tr><td>只有一个实现、没有测试需求、也不共享</td><td>❌ 否（别过度）</td></tr>
+    </tbody>
+  </table>
+  <div class="note">
+    <span class="label">一句话判断</span>
+    <strong>这个依赖"会不会变 / 要不要替换 / 要不要共享"——三个问题有一个是"是"，就值得注入；全是"否"，就别抽。</strong>
+  </div>
+
+  <h2>五、同一个思想在项目里的五种长相</h2>
+  <table>
+    <thead><tr><th>形态</th><th>代码</th><th>注入的东西</th></tr></thead>
+    <tbody>
+      <tr><td>闭包工厂</td><td><code>build_kb_tool</code> / <code>build_weather_tool</code></td><td>pipeline、API Key、endpoint</td></tr>
+      <tr><td>类构造注入</td><td><code>AgentRunner(settings, registry, llm, skills)</code></td><td>配置、工具表、模型、skill 加载器</td></tr>
+      <tr><td>适配器工厂</td><td><code>get_llm(settings)</code></td><td>选哪个实现</td></tr>
+      <tr><td>应用级单例</td><td><code>app.state.pipeline</code></td><td>全应用共享的状态</td></tr>
+      <tr><td>前端 props / emits</td><td><code>AgentPanel :result :skills @ask</code></td><td>数据向下、事件向上（同一种"依赖由外部给"）</td></tr>
+    </tbody>
+  </table>
+
+  <h2>六、三种常见反面写法</h2>
+  <table>
+    <thead><tr><th>反面写法</th><th>后果</th></tr></thead>
+    <tbody>
+      <tr><td>模块级全局 <code>_pipeline</code></td><td>装配顺序敏感、测试互相污染、隐式依赖</td></tr>
+      <tr><td>handler 内部自己 <code>new</code></td><td>重复创建客户端、共享不到同一份索引、测试真调外部</td></tr>
+      <tr><td>工厂参数无限膨胀</td><td><code>build_x(a, b, c, d, e, f, ...)</code> 变成 God Factory；该把一组依赖收敛成一个对象（如 <code>Settings</code> 或上下文）</td></tr>
+    </tbody>
+  </table>
+
+  <h2>七、迁移练习（照着四步做）</h2>
+
+  <div class="note">
+    <span class="label">练习 A · 新增翻译工具</span>
+    需求：<code>translate(text, target_lang)</code>，调用 LLM，Key 来自配置。<br>
+    ① 依赖：<code>llm</code>、<code>api_key</code>；② 注入点：<code>build_translate_tool(llm, api_key)</code>；
+    ③ 组合根：<code>main.py</code> 注册；④ 假实现：<code>FakeLLM</code> 返回固定译文。
+  </div>
+
+  <div class="note">
+    <span class="label">练习 B · 订单通知</span>
+    需求：下单成功后发邮件。① 依赖：<code>EmailClient</code>；② 注入点：<code>OrderService(notifier)</code>；
+    ③ 组合根：应用启动时创建；④ 假实现：<code>FakeNotifier</code> 记录调用次数，测试断言"发了一次"。
+  </div>
+
+  <div class="note">
+    <span class="label">练习 C · 测试 max_steps</span>
+    需求：验证 AgentRunner 到上限会停。① 依赖：LLM；② 注入点：构造函数；
+    ③ 组合根：测试里直接创建；④ 假实现：<code>ScriptedLLM</code> 永远返回 tool_calls。
+    这就是项目里 T18/T28 的真实做法。
+  </div>
+
+  <div class="note">
+    <span class="label">练习 D · 判断该不该抽</span>
+    以下三个，哪些值得注入？<br>
+    ① 一个把字符串转大写的纯函数；② 读取当前时间的 <code>now()</code>；③ 发送短信的客户端。<br>
+    答案：① 不值得；② 值得（测试需要固定时间）；③ 值得（外部 IO + 可替换）。
+  </div>
+
+  <h2>八、自测（凭记忆答）</h2>
+
+  <div class="quiz" data-answer="a">
+    <p class="q">1. 工厂参数注入的核心动作是什么？</p>
+    <button class="quiz-option" data-key="a">由外部把依赖传入，工厂用闭包把它绑定进成品</button>
+    <button class="quiz-option" data-key="b">在函数内部创建所有依赖</button>
+    <button class="quiz-option" data-key="c">把所有依赖写成模块级全局变量</button>
+    <button class="quiz-option" data-key="d">把依赖写进注释里说明</button>
+    <p class="feedback"
+       data-correct="对。参数是注入点，闭包负责固定依赖。"
+       data-wrong="再想想：核心是「外部创建、内部使用」。"></p>
+  </div>
+
+  <div class="quiz" data-answer="a">
+    <p class="q">2. 组合根指的是什么？</p>
+    <button class="quiz-option" data-key="a">唯一集中创建依赖、完成装配的地方（如 create_app）</button>
+    <button class="quiz-option" data-key="b">项目的 git 根目录</button>
+    <button class="quiz-option" data-key="c">每个模块的 __init__.py</button>
+    <button class="quiz-option" data-key="d">测试文件</button>
+    <p class="feedback"
+       data-correct="对。装配集中在一处，业务代码只接收成品。"
+       data-wrong="再想想：组合根解决的是「在哪里 new」，不是目录结构。"></p>
+  </div>
+
+  <div class="quiz" data-answer="a">
+    <p class="q">3. 下面哪种情况最不需要注入？</p>
+    <button class="quiz-option" data-key="a">只依赖参数、不会变、也没有第二实现的纯函数</button>
+    <button class="quiz-option" data-key="b">调用外部模型 API</button>
+    <button class="quiz-option" data-key="c">需要与 API 层共享同一个 store</button>
+    <button class="quiz-option" data-key="d">测试时需要替换成假时钟</button>
+    <p class="feedback"
+       data-correct="对。没有变化点就没有注入的价值。"
+       data-wrong="再想想：注入是为了应对「会变 / 要替换 / 要共享」，不是越多越好。"></p>
+  </div>
+
+  <div class="quiz" data-answer="a">
+    <p class="q">4. 工厂参数多到失控时，应该怎么做？</p>
+    <button class="quiz-option" data-key="a">把一组相关依赖收敛成一个对象（如 Settings / 上下文）</button>
+    <button class="quiz-option" data-key="b">继续加参数，反正 Python 支持</button>
+    <button class="quiz-option" data-key="c">改成模块级全局变量</button>
+    <button class="quiz-option" data-key="d">把所有依赖写进 handler 内部自己创建</button>
+    <p class="feedback"
+       data-correct="对。参数膨胀说明缺一个「依赖包」，而不是缺更多参数。"
+       data-wrong="再想想：全局变量与内部 new 都是退步。"></p>
+  </div>
+
+  <h2>九、带走这张清单</h2>
+  <div class="note">
+    <span class="label">遇到新功能时，按顺序问四句</span>
+    ① 它需要什么外部东西？<br>
+    ② 这些东西会变 / 要替换 / 要共享吗？<br>
+    ③ 我该在哪个层注入（函数 / 类 / 应用装配 / 环境变量）？<br>
+    ④ 我能不能用一个假实现，在不连外部服务的情况下测它？<br>
+    四句都能答上来，工厂注入就写对了。
+  </div>
+
+  <h2>十、想深入时读这个</h2>
+  <p><strong>首选：</strong><a href="https://martinfowler.com/articles/injection.html">Martin Fowler · Inversion of Control Containers and the Dependency Injection pattern</a>（英文，无官方中文）——DI 的原始经典文章，分清"控制反转 / 依赖注入 / 服务定位器"。</p>
+  <p><strong>回顾：</strong><a href="0013-dependency-injection.html">课程 0013 · 依赖注入</a>——自己 new vs 注入、三个替换场景、别过度。</p>
+  <p><strong>本课源头：</strong><a href="../../kbqa/tools/kb_tool.py">kbqa/tools/kb_tool.py</a> · <a href="../../api/main.py">api/main.py</a></p>
+
+  <div class="foot">
+    想练手就把练习 A/B/C 真写一遍。写完可以贴给我，我帮你看"依赖识别得对不对、注入点选得合不合适"。我是你的老师，问多基础都可以。
+  </div>
+
+</div>
+<script src="../assets/quiz.js"></script>
+</body>
+</html>

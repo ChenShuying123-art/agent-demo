@@ -1,0 +1,145 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>课程 0032 · 框架到底替你做了什么：拆解 T29</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+<div class="wrap">
+
+  <p class="eyebrow">课程 0032 · Agent 化实战 · 对应任务 T29</p>
+  <h1>框架到底替你做了什么</h1>
+  <p class="lede">T29 是这门课的最后一块拼图：同一批问题、同一套工具、同一个模型，分别用手写 loop 和 LangGraph 跑一遍。结论不是"谁更好"，而是<strong>框架替你做了什么、又藏起了什么</strong>。</p>
+
+  <div class="win">
+    <strong>学完你能做到：</strong>设计双引擎对照实验；从工具序列、答案、步数、耗时、代码量五个维度读结果；并给出"什么时候选手写 / 什么时候选图"的判断。
+    <br><span class="muted">配套：<a href="../reference/python-concepts-glossary.html">术语表</a> · 前置 <a href="0031-how-to-write-t28.html">课程 0031</a></span>
+  </div>
+
+  <h2>一、实验设计</h2>
+  <table>
+    <thead><tr><th>控制变量</th><th>两版共用</th></tr></thead>
+    <tbody>
+      <tr><td>问题集</td><td>3 题（事实 / 实时 / 事实）</td></tr>
+      <tr><td>工具</td><td>同一个 <code>ToolRegistry</code>（get_datetime + search_knowledge_base）</td></tr>
+      <tr><td>模型</td><td>同一个 <code>llm</code> 实例与配置</td></tr>
+      <tr><td>输出契约</td><td>同一个 <code>AgentRun</code></td></tr>
+    </tbody>
+  </table>
+  <p>唯一变量：<code>handwritten</code> vs <code>langgraph</code>。</p>
+
+  <h2>二、实测结果</h2>
+  <table>
+    <thead><tr><th>问题</th><th>手写</th><th>LangGraph</th></tr></thead>
+    <tbody>
+      <tr>
+        <td>豆豆的疫苗本编号</td>
+        <td>未调工具，回答"需要更多背景信息"</td>
+        <td>调 <code>search_knowledge_base</code>，答出 <code>VX-2021-0314-77</code></td>
+      </tr>
+      <tr>
+        <td>今天几号，星期几</td>
+        <td>调 <code>get_datetime</code>，正确</td>
+        <td>调 <code>get_datetime</code>，正确（两版一致）</td>
+      </tr>
+      <tr>
+        <td>2025 年旅行</td>
+        <td>调检索，回答正确（6466ms）</td>
+        <td>调检索，回答正确（17297ms）</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <div class="note">
+    <span class="label">怎么解释"同一问题工具选择不同"</span>
+    两版都把决定权交给模型，<strong>温度、采样、上下文完全一样也会出现差异</strong>。这不是框架 bug，而是 LLM 的非确定性。对照实验要如实记录，不能挑一个"好看"的结果。
+  </div>
+
+  <h2>三、确定性边界：max_steps</h2>
+  <pre><code>max_steps=3，脚本化 LLM 每轮都请求工具
+
+手写：      stop=max_steps rounds=3 steps=2 tool_calls=2
+LangGraph： stop=max_steps rounds=3 steps=2 tool_calls=2
+一致性：✅</code></pre>
+  <p>这是两条实现"行为等价"的证据：控制流被刻意设计成同一套规则，差异只在表达方式。</p>
+
+  <h2>四、结构与依赖差异</h2>
+  <table>
+    <thead><tr><th>维度</th><th>手写版</th><th>LangGraph 版</th></tr></thead>
+    <tbody>
+      <tr><td>代码量</td><td>538 行，显式 while/for</td><td>264 行，StateGraph + 节点</td></tr>
+      <tr><td>依赖</td><td>零框架</td><td>langgraph（可选安装）</td></tr>
+      <tr><td>启动</td><td>不 import langgraph</td><td>选择该引擎时才延迟导入</td></tr>
+      <tr><td>可读性</td><td>逐行可见，适合学习</td><td>图结构清晰，但需要理解 State/Node/Edge</td></tr>
+      <tr><td>排查</td><td>调用栈浅</td><td>框架层更深，先学框架再排查</td></tr>
+      <tr><td>扩展</td><td>加分支要改 if/while</td><td>加节点/边即可，适合复杂流程</td></tr>
+    </tbody>
+  </table>
+
+  <h2>五、结论：不是"谁更好"</h2>
+  <ul>
+    <li><strong>学习阶段选手写</strong>：你会真正理解"轮数、工具、停止条件"是什么，而不是记住几个 API。</li>
+    <li><strong>流程复杂后选图</strong>：分支、并行、人工介入、持久化、断点续跑，这些用 while 写会迅速失控。</li>
+    <li><strong>框架的成本</strong>：多一层依赖、多一组概念、调用栈更深；它把控制流声明化，也把一部分行为藏了起来。</li>
+  </ul>
+
+  <h2>六、亲手做一遍</h2>
+  <div class="note">
+    <span class="label">练习 A · 跑一次对照</span>
+    <code>python eval/agent_engine_compare.py</code>，看报告里的"差异与结论"是否与你预期一致。
+  </div>
+  <div class="note">
+    <span class="label">练习 B · 固定采样</span>
+    把 <code>CHAT_TEMPERATURE</code> 设为 0 再跑一次，观察工具序列是否更稳定。想清楚：即使 temperature=0，结果就一定完全可复现吗？
+  </div>
+  <div class="note">
+    <span class="label">练习 C · 加一个节点</span>
+    在 LangGraph 版里加一个"答案检查"节点（例如检查是否含引用），体会加节点的成本；再想想同样的改动在手写版里要改哪里。
+  </div>
+
+  <h2>七、自测（凭记忆答）</h2>
+  <div class="quiz" data-answer="a">
+    <p class="q">1. 双引擎对照里，哪一项不是控制变量？</p>
+    <button class="quiz-option" data-key="a">耗时</button>
+    <button class="quiz-option" data-key="b">工具注册表</button>
+    <button class="quiz-option" data-key="c">问题集</button>
+    <button class="quiz-option" data-key="d">输出契约</button>
+    <p class="feedback"
+       data-correct="对。耗时是要观察的结果，不能强行一致。"
+       data-wrong="再想想：工具、问题、契约都必须共用。"></p>
+  </div>
+  <div class="quiz" data-answer="a">
+    <p class="q">2. 同一问题两版工具选择不同，最可能的原因是什么？</p>
+    <button class="quiz-option" data-key="a">模型采样的非确定性</button>
+    <button class="quiz-option" data-key="b">LangGraph 自动改了工具</button>
+    <button class="quiz-option" data-key="c">手写版没有注册工具</button>
+    <button class="quiz-option" data-key="d">AgentRun 字段不兼容</button>
+    <p class="feedback"
+       data-correct="对。两版都把决定权交给模型，采样会带来波动。"
+       data-wrong="再想想：工具注册表与契约都是共用的。"></p>
+  </div>
+  <div class="quiz" data-answer="a">
+    <p class="q">3. 什么时候更该选 LangGraph？</p>
+    <button class="quiz-option" data-key="a">流程出现分支、并行、人工介入、持久化等复杂需求时</button>
+    <button class="quiz-option" data-key="b">任何时候，因为框架一定更快</button>
+    <button class="quiz-option" data-key="c">只想逐行学习 loop 时</button>
+    <button class="quiz-option" data-key="d">需要零依赖时</button>
+    <p class="feedback"
+       data-correct="对。框架的价值在复杂流程的 organization，不在简单 loop。"
+       data-wrong="再想想：学习与零依赖场景，手写版更合适。"></p>
+  </div>
+
+  <h2>八、想深入时读这个</h2>
+  <p><strong>本课产物：</strong><a href="../../eval/agent_engine_compare.py">eval/agent_engine_compare.py</a> · <a href="../../eval/agent_engine_compare.md">eval/agent_engine_compare.md</a></p>
+  <p><strong>框架：</strong><a href="https://github.com/langchain-ai/langgraph">LangGraph 官方仓库</a>（英文）。</p>
+
+  <div class="foot">
+    这门课到这里就结束了。如果你能对着两版代码讲清"框架替你做了什么、藏起了什么"，T28/T29 的目标就达成了。还有问题随时问。
+  </div>
+
+</div>
+<script src="../assets/quiz.js"></script>
+</body>
+</html>

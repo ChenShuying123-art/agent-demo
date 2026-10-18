@@ -1,0 +1,141 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>课程 0024 · 两条路线的对照：拆解 T21</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+<div class="wrap">
+
+  <p class="eyebrow">课程 0024 · Agent 化实战 · 对应任务 T21</p>
+  <h1>两条路线的对照</h1>
+  <p class="lede">固定链路永远检索；Agent 自己决定要不要调工具。T21 用同一批问题把两条路各跑一遍，把「谁调了什么、快不快、答得对不对」摊在一张表里。结果里既有惊喜，也有一个真实的反例。</p>
+
+  <div class="win">
+    <strong>学完你能做到：</strong>设计一个公平的对照实验；读懂「工具选择」与「答案质量」是两件事；并能从一个反例里判断问题出在提示词、工具描述还是模型行为。
+    <br><span class="muted">配套：<a href="../reference/python-concepts-glossary.html">术语表</a> · 前置 <a href="0021-how-to-write-t18.html">课程 0021</a> / <a href="0022-how-to-write-t19.html">0022</a></span>
+  </div>
+
+  <h2>一、实验设计</h2>
+  <table>
+    <thead><tr><th>变量</th><th>固定链路</th><th>Agent</th></tr></thead>
+    <tbody>
+      <tr><td>入口</td><td><code>pipeline.answer(style="strict_citation")</code></td><td><code>AgentRunner.run</code></td></tr>
+      <tr><td>检索</td><td>必然召回 + 重排</td><td>模型决定是否调 <code>search_knowledge_base</code></td></tr>
+      <tr><td>实时信息</td><td>无工具，只能拒答</td><td>可调用 <code>get_datetime</code></td></tr>
+      <tr><td>问题集</td><td colspan="2">同一批（3 题：事实题 / 实时题 / 事实题）</td></tr>
+    </tbody>
+  </table>
+  <p>控制变量：同一个 <code>store</code>、同一个 <code>llm</code>、同一批问题。差异只来自"是否自主调工具"。</p>
+
+  <h2>二、指标</h2>
+  <ul>
+    <li><strong>是否调工具 / 调了哪些 / 步数</strong>：看"选择"；</li>
+    <li><strong>耗时</strong>：看成本，但不是公平比较（轮数不同）；</li>
+    <li><strong>引用数</strong>：看可溯源性；</li>
+    <li><strong>答案是否正确</strong>：最终标准。</li>
+  </ul>
+
+  <h2>三、实测结果</h2>
+  <table>
+    <thead><tr><th>问题</th><th>固定链路</th><th>Agent</th></tr></thead>
+    <tbody>
+      <tr>
+        <td>今天几号，星期几？</td>
+        <td>检索 10 条后拒答「资料中未提供当前日期」</td>
+        <td>调 <code>get_datetime</code>，正确回答 2026-10-18 星期日</td>
+      </tr>
+      <tr>
+        <td>豆豆的疫苗本编号是什么？</td>
+        <td>检索并正确回答 <code>VX-2021-0314-77 [1]</code></td>
+        <td><strong>没有调工具</strong>，以"隐私信息"为由拒绝回答</td>
+      </tr>
+      <tr>
+        <td>2025 年旅行去了哪些地方？</td>
+        <td>检索并回答（1 条有效引用）</td>
+        <td>调 <code>search_knowledge_base</code>，回答正确，但未带 [n] 引用</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <div class="note">
+    <span class="label">两个真正的差异案例</span>
+    ① 实时题：固定链路只能拒答，Agent 换用日期工具——这是"选择"的价值。<br>
+    ② 事实题：Agent 反而没用工具，直接拒答——这是"选择"的风险。
+    <strong>Agent 不是无脑更强，它只是把决定权交给了模型。</strong>
+  </div>
+
+  <h2>四、怎么解释反例</h2>
+  <p>「豆豆的疫苗本编号」在知识库里有明确记录，Agent 却选择不检索。可能原因：</p>
+  <ol>
+    <li>system prompt 没有强调"本地知识库是可信来源，隐私类问题也应先查库"；</li>
+    <li>工具描述没有覆盖"个人记录"这类场景；</li>
+    <li>模型的安全偏好压过了工具使用倾向。</li>
+  </ol>
+  <p>修法不是"骂模型"，而是把需求写进 prompt / 工具描述，再用同一批问题复测。对照实验的价值就在这里：它把"感觉不太对"变成可定位的问题。</p>
+
+  <h2>五、耗时怎么看</h2>
+  <pre><code>固定链路平均 2744 ms
+Agent 平均      4219 ms</code></pre>
+  <p>Agent 更慢是正常的：它可能多一轮模型调用、多一次工具执行。不要用"更慢"直接判负——要看它换来了什么（实时信息、少检索、多步推理）。</p>
+
+  <h2>六、亲手做一遍</h2>
+  <div class="note">
+    <span class="label">练习 A · 换一批问题</span>
+    运行 <code>python eval/agent_compare.py "你的问题1" "你的问题2"</code>，看 Agent 是否调工具，并记录差异。
+  </div>
+  <div class="note">
+    <span class="label">练习 B · 修 prompt 再复测</span>
+    在 <code>_SYSTEM_PROMPT</code> 里加一句"本地知识库是可信来源，涉及个人记录也先检索"，重跑疫苗题，观察是否开始调 <code>search_knowledge_base</code>。
+  </div>
+  <div class="note">
+    <span class="label">练习 C · 设计一个公平指标</span>
+    如果要比"单位成本下的正确率"，你会怎么定义分母：轮数、工具次数、token，还是耗时？写出你的公式。
+  </div>
+
+  <h2>七、自测（凭记忆答）</h2>
+  <div class="quiz" data-answer="a">
+    <p class="q">1. 对照实验里，哪一项必须保持一致？</p>
+    <button class="quiz-option" data-key="a">store、llm 与问题集</button>
+    <button class="quiz-option" data-key="b">两边的耗时</button>
+    <button class="quiz-option" data-key="c">两边的工具调用次数</button>
+    <button class="quiz-option" data-key="d">两边的答案长度</button>
+    <p class="feedback"
+       data-correct="对。控制变量后，差异才能归因到是否自主调工具。"
+       data-wrong="再想想：耗时和工具次数正是要被观察的结果，不能强行一致。"></p>
+  </div>
+  <div class="quiz" data-answer="a">
+    <p class="q">2. Agent 在疫苗题上拒答说明了什么？</p>
+    <button class="quiz-option" data-key="a">自主选择有风险，需要 prompt 与工具描述引导</button>
+    <button class="quiz-option" data-key="b">知识库检索一定不可靠</button>
+    <button class="quiz-option" data-key="c">固定链路永远不会拒答</button>
+    <button class="quiz-option" data-key="d">Agent 的耗时一定更短</button>
+    <p class="feedback"
+       data-correct="对。反例是定位问题的入口，不是否定 Agent 的理由。"
+       data-wrong="再想想：固定链路也有自己的边界，关键是从反例里找可改进项。"></p>
+  </div>
+  <div class="quiz" data-answer="a">
+    <p class="q">3. 为什么不能直接用平均耗时判 Agent 更差？</p>
+    <button class="quiz-option" data-key="a">Agent 可能用额外轮数换来了实时信息或多步推理</button>
+    <button class="quiz-option" data-key="b">因为耗时统计一定是错的</button>
+    <button class="quiz-option" data-key="c">因为固定链路没有耗时</button>
+    <button class="quiz-option" data-key="d">因为 Agent 的答案一定更短</button>
+    <p class="feedback"
+       data-correct="对。成本和收益要一起看。"
+       data-wrong="再想想：耗时是事实，但它不是唯一指标。"></p>
+  </div>
+
+  <h2>八、想深入时读这个</h2>
+  <p><strong>本课产物：</strong><a href="../../eval/agent_compare.py">eval/agent_compare.py</a> · <a href="../../eval/agent_compare.md">eval/agent_compare.md</a></p>
+  <p><strong>回顾：</strong><a href="0011-how-to-write-t8.html">课程 0011 · 检索编排</a>、<a href="0021-how-to-write-t18.html">课程 0021 · agent loop</a></p>
+
+  <div class="foot">
+    不清楚就直接问，比如"对照实验要不要固定随机种子""怎么统计 token 成本"。我是你的老师，问多基础都可以。
+  </div>
+
+</div>
+<script src="../assets/quiz.js"></script>
+</body>
+</html>

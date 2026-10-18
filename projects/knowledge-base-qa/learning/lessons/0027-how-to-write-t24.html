@@ -1,0 +1,128 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>课程 0027 · 工具跑在另一个进程里：拆解 T24</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+<div class="wrap">
+
+  <p class="eyebrow">课程 0027 · Agent 化实战 · 对应任务 T24</p>
+  <h1>工具跑在另一个进程里</h1>
+  <p class="lede">T24 写一个 MCP server，只暴露一个工具：<code>write_markdown</code>。重点不是"能写文件"，而是<strong>写文件的边界</strong>：目录固定、拒绝路径穿越、内容有上限。MCP 让工具跑在独立进程里，安全边界也更容易划清。</p>
+
+  <div class="win">
+    <strong>学完你能做到：</strong>理解 MCP 的 server / client / stdio 三个词；用官方 SDK 注册一个工具；并把"模型无权指定路径"写成代码而不是口号。
+    <br><span class="muted">配套：<a href="../reference/python-concepts-glossary.html">术语表</a> · 前置 <a href="0020-how-to-write-t17.html">课程 0020</a></span>
+  </div>
+
+  <h2>一、MCP 是什么（一句话版）</h2>
+  <div class="diagram">
+    <div class="dbox"><strong>agent（client）</strong><span>本进程</span></div>
+    <div class="darrow">↔ stdio（JSON-RPC）</div>
+    <div class="dbox lead"><strong>md_writer（server）</strong><span>另一个 python 进程</span></div>
+    <div class="dcap">图 1 · 工具不在你的进程里，通过协议调用</div>
+  </div>
+  <p>本项目用 <strong>stdio</strong>：不需要网络，本机就能跑，而且能直观看到"工具跑在另一个进程里"。</p>
+
+  <h2>二、用官方 SDK 注册工具</h2>
+  <pre><code>from mcp.server.mcpserver import MCPServer
+
+server = MCPServer("md_writer")
+
+@server.tool(name="write_markdown", description="...")
+def write_markdown(filename: str, content: str) -&gt; str:
+    ...
+
+if __name__ == "__main__":
+    server.run()   # 默认 stdio</code></pre>
+  <p class="muted">本项目使用 mcp 2.x；1.x 里这个类叫 <code>FastMCP</code>，2.x 改名为 <code>MCPServer</code>（API 基本一致）。</p>
+  <p>注意：函数签名就是 schema 的来源（<code>filename: str</code> / <code>content: str</code>），这与本地工具的"手写 JSON Schema"不同——MCP SDK 替你生成了 schema。</p>
+
+  <h2>三、写盘边界（本课重点）</h2>
+  <pre><code>candidate = Path(name)
+if candidate.is_absolute() or candidate.name != name or ".." in candidate.parts:
+    return "写入失败：filename 只能是纯文件名，不能包含路径或 ..。"</code></pre>
+  <ul>
+    <li><strong>目录固定</strong>：<code>EXPORT_DIR</code> 由服务端决定，模型只能给文件名；</li>
+    <li><strong>拒绝绝对路径 / 盘符</strong>：<code>C:\evil.md</code>、<code>/etc/passwd</code> 都不行；</li>
+    <li><strong>拒绝 ..</strong>：<code>../../evil.md</code> 会被 <code>candidate.name != name</code> 拦住；</li>
+    <li><strong>双保险</strong>：写入前再 <code>resolve().relative_to(EXPORT_DIR)</code> 校验一次；</li>
+    <li><strong>内容上限</strong>：超过 200,000 字符直接拒绝，避免一次写爆磁盘。</li>
+  </ul>
+  <div class="note">
+    <span class="label">为什么不用"清洗文件名"</span>
+    把 <code>../../evil.md</code> 洗成 <code>evil.md</code> 看似友好，但会让调用方<strong>以为自己成功了</strong>。这里的工具选择了更明确的行为：<strong>拒绝并说明原因</strong>，模型下一轮可以改成合法文件名。
+  </div>
+
+  <h2>四、实测数据</h2>
+  <table>
+    <thead><tr><th>验收点</th><th>实测</th></tr></thead>
+    <tbody>
+      <tr><td>列出工具</td><td>✅ <code>["write_markdown"]</code></td></tr>
+      <tr><td>写入 <code>hello.md</code></td><td>✅ 文件内容与传入一致，返回落盘绝对路径</td></tr>
+      <tr><td><code>../../evil.md</code></td><td>✅ 返回「写入失败：filename 只能是纯文件名…」，目录外无文件</td></tr>
+      <tr><td>依赖</td><td>✅ 官方 SDK（mcp 2.3.0），依赖说明见 <code>requirements-mcp.txt</code></td></tr>
+    </tbody>
+  </table>
+
+  <h2>五、亲手做一遍</h2>
+  <div class="note">
+    <span class="label">练习 A · 用官方 client 调一次</span>
+    用 <code>ClientSession + stdio_client</code> 连接 server，执行 <code>list_tools</code> 与 <code>call_tool</code>，观察返回的 <code>content</code> 结构。
+  </div>
+  <div class="note">
+    <span class="label">练习 B · 绕过尝试</span>
+    分别尝试 <code>C:\evil.md</code>、<code>/tmp/evil.md</code>、<code>a/../../evil.md</code>，确认三种都被拒绝。
+  </div>
+  <div class="note">
+    <span class="label">练习 C · 内容上限</span>
+    把 <code>_MAX_CONTENT_CHARS</code> 调小到 100，传 200 字，观察拒绝文本。
+  </div>
+
+  <h2>六、自测（凭记忆答）</h2>
+  <div class="quiz" data-answer="a">
+    <p class="q">1. 为什么写文件工具不让模型指定目录？</p>
+    <button class="quiz-option" data-key="a">目录是安全边界，模型只能决定文件名</button>
+    <button class="quiz-option" data-key="b">因为模型不会拼路径</button>
+    <button class="quiz-option" data-key="c">因为目录参数会让 schema 变长</button>
+    <button class="quiz-option" data-key="d">因为 MCP 协议不支持路径</button>
+    <p class="feedback"
+       data-correct="对。把「能写哪里」收在服务端，模型无权越界。"
+       data-wrong="再想想：这是权限设计，不是能力或协议限制。"></p>
+  </div>
+  <div class="quiz" data-answer="a">
+    <p class="q">2. stdio 传输的好处是什么？</p>
+    <button class="quiz-option" data-key="a">不需要网络，本机可跑，进程边界清晰</button>
+    <button class="quiz-option" data-key="b">传输速度一定比 HTTP 快</button>
+    <button class="quiz-option" data-key="c">可以自动加密所有内容</button>
+    <button class="quiz-option" data-key="d">不需要任何依赖</button>
+    <p class="feedback"
+       data-correct="对。HTTP 传输本课不做，stdio 足够学习与本地演示。"
+       data-wrong="再想想：重点是无需网络与可观测的进程边界。"></p>
+  </div>
+  <div class="quiz" data-answer="a">
+    <p class="q">3. 为什么写入前还要做一次 resolve 校验？</p>
+    <button class="quiz-option" data-key="a">防止符号链接或路径拼接绕过前面的检查</button>
+    <button class="quiz-option" data-key="b">为了让写入速度更快</button>
+    <button class="quiz-option" data-key="c">因为 Path.name 在 Windows 上不可靠</button>
+    <button class="quiz-option" data-key="d">因为 MCP 要求必须调用 resolve</button>
+    <p class="feedback"
+       data-correct="对。安全边界要双保险，不能只信一层字符串检查。"
+       data-wrong="再想想：真实路径可能被符号链接改变。"></p>
+  </div>
+
+  <h2>七、想深入时读这个</h2>
+  <p><strong>MCP 官方文档：</strong><a href="https://modelcontextprotocol.io/docs/getting-started/intro">Model Context Protocol</a>（英文，无官方中文）——协议、传输、工具/资源/提示。</p>
+  <p><strong>本课代码：</strong><a href="../../mcp_servers/md_writer/server.py">mcp_servers/md_writer/server.py</a></p>
+
+  <div class="foot">
+    不清楚就直接问，比如"为什么 MCP 要单独起一个进程""stdio 和 HTTP 传输怎么选"。我是你的老师，问多基础都可以。
+  </div>
+
+</div>
+<script src="../assets/quiz.js"></script>
+</body>
+</html>

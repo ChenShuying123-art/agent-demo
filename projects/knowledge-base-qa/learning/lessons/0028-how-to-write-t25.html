@@ -1,0 +1,129 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>课程 0028 · 把远程工具接进同一张表：拆解 T25</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+<div class="wrap">
+
+  <p class="eyebrow">课程 0028 · Agent 化实战 · 对应任务 T25</p>
+  <h1>把远程工具接进同一张表</h1>
+  <p class="lede">T24 的 server 只会在另一个进程里说话。T25 写 client：启动时 <code>tools/list</code>，把每个远程工具包装成本地 <code>Tool</code>，注册进同一个 registry。这样 agent loop 完全不知道"这个工具在另一个进程里"。</p>
+
+  <div class="win">
+    <strong>学完你能做到：</strong>说清 MCP client 的三步（list → wrap → register）；理解名称前缀与失败隔离；并知道"默认关闭 + 延迟 import"为什么重要。
+    <br><span class="muted">配套：<a href="../reference/python-concepts-glossary.html">术语表</a> · 前置 <a href="0027-how-to-write-t24.html">课程 0027</a></span>
+  </div>
+
+  <h2>一、三步接入</h2>
+  <div class="diagram">
+    <div class="dbox"><strong>① tools/list</strong><span>启动 server，拿回工具清单</span></div>
+    <div class="darrow">↓</div>
+    <div class="dbox"><strong>② 包装成 Tool</strong><span>name = server.tool，parameters = inputSchema</span></div>
+    <div class="darrow">↓</div>
+    <div class="dbox lead"><strong>③ registry.register</strong><span>与本地工具同表，loop 无感知</span></div>
+    <div class="dcap">图 1 · 远程与本地在 registry 这一层被抹平</div>
+  </div>
+
+  <h2>二、名称前缀：避免撞名</h2>
+  <pre><code>full_name = f"{server_name}.{remote_name}"
+# 例：md_writer.write_markdown</code></pre>
+  <p>没有前缀，两个 server 都暴露 <code>write_markdown</code> 时就会撞名。前缀也是模型看到的工具名——它仍然能理解。</p>
+
+  <h2>三、失败隔离</h2>
+  <pre><code>try:
+    remote_tools = _list_tools_sync(settings, spec)
+except Exception as exc:
+    logger.warning("MCP server 启动失败 name=%s 原因=%s", server_name, exc)
+    continue</code></pre>
+  <p>某个 server 命令写错、崩溃、超时，只丢这一批工具；本地工具与 <code>/api/agent/chat</code> 仍然可用。<strong>MCP 不是必需依赖。</strong></p>
+
+  <h2>四、默认关闭 + 延迟 import</h2>
+  <pre><code>if not settings.mcp_enabled:
+    logger.info("MCP 未启用，跳过")
+    return
+# 真正要用时才：
+from mcp import ClientSession
+</code></pre>
+  <p>这样即使环境里没装 <code>mcp</code>，<code>MCP_ENABLED=false</code> 的应用也能正常启动。实测：关闭时 <code>"mcp" not in sys.modules</code>。</p>
+
+  <h2>五、每次调用开一个会话：一个明确的取舍</h2>
+  <p>当前实现每次 <code>tools/call</code> 都重新启动 server、握手、调用、关闭。好处是隔离好、实现简单；代价是每次多几秒（实测 3–5 秒）。</p>
+  <div class="note">
+    <span class="label">什么时候该改成常驻会话</span>
+    当工具调用频率变高、延迟不可接受时，再引入"后台事件循环 + 长连接"。本批优先可观测性与实现简单，先不做连接池。
+  </div>
+
+  <h2>六、实测数据</h2>
+  <table>
+    <thead><tr><th>验收点</th><th>实测</th></tr></thead>
+    <tbody>
+      <tr><td><code>MCP_ENABLED=false</code></td><td>✅ 只有本地工具；<code>mcp</code> 模块未被 import</td></tr>
+      <tr><td>启用 md_writer</td><td>✅ registry 出现 <code>md_writer.write_markdown</code></td></tr>
+      <tr><td>调用写文件</td><td>✅ <code>agent.md</code> 落盘，内容一致（5.7s）</td></tr>
+      <tr><td>server 命令写错</td><td>✅ 只记 WARNING；剩余工具（<code>get_datetime</code>）仍可用</td></tr>
+      <tr><td>Agent 调用 MCP 工具</td><td>✅ 1 步成功，<code>trace.md</code> 落盘，<code>final_answer</code></td></tr>
+    </tbody>
+  </table>
+
+  <h2>七、亲手做一遍</h2>
+  <div class="note">
+    <span class="label">练习 A · 打开 MCP</span>
+    在 <code>.env</code> 里设 <code>MCP_ENABLED=true</code> 与 <code>MCP_SERVERS=[...]</code>，重启服务，确认工具轨迹里出现 <code>md_writer.write_markdown</code>。
+  </div>
+  <div class="note">
+    <span class="label">练习 B · 制造失败</span>
+    把 server 命令改成不存在的文件，确认应用仍启动、其余工具可用、日志有 WARNING。
+  </div>
+  <div class="note">
+    <span class="label">练习 C · 设计题</span>
+    如果要支持两个 MCP server 且都暴露同名工具，前缀方案还能工作吗？如果要"覆盖"同名工具，应该在哪一层做决定？
+  </div>
+
+  <h2>八、自测（凭记忆答）</h2>
+  <div class="quiz" data-answer="a">
+    <p class="q">1. MCP client 启动时先做什么？</p>
+    <button class="quiz-option" data-key="a">tools/list，拿到远程工具清单</button>
+    <button class="quiz-option" data-key="b">直接调用 write_markdown</button>
+    <button class="quiz-option" data-key="c">先删除本地工具，避免撞名</button>
+    <button class="quiz-option" data-key="d">把整个 server 源码 import 进来</button>
+    <p class="feedback"
+       data-correct="对。先发现工具，再包装注册。"
+       data-wrong="再想想：client 不需要知道 server 的实现，只要协议清单。"></p>
+  </div>
+  <div class="quiz" data-answer="a">
+    <p class="q">2. 为什么 MCP 工具要加 server 前缀？</p>
+    <button class="quiz-option" data-key="a">避免多个 server 的同名工具撞车</button>
+    <button class="quiz-option" data-key="b">让工具名变得更好看</button>
+    <button class="quiz-option" data-key="c">前缀会提高调用速度</button>
+    <button class="quiz-option" data-key="d">MCP 协议强制要求前缀</button>
+    <p class="feedback"
+       data-correct="对。这是命名空间，不是协议要求。"
+       data-wrong="再想想：多个 server 都可能暴露 write_markdown。"></p>
+  </div>
+  <div class="quiz" data-answer="a">
+    <p class="q">3. MCP_ENABLED=false 时应该发生什么？</p>
+    <button class="quiz-option" data-key="a">不 import mcp，也不注册任何远程工具</button>
+    <button class="quiz-option" data-key="b">仍然启动所有 server，只是不调用</button>
+    <button class="quiz-option" data-key="c">应用启动失败</button>
+    <button class="quiz-option" data-key="d">自动切换成 mock 工具</button>
+    <p class="feedback"
+       data-correct="对。MCP 是可选能力，关闭时一切照旧。"
+       data-wrong="再想想：连 import 都不该发生，避免可选依赖变成必需依赖。"></p>
+  </div>
+
+  <h2>九、想深入时读这个</h2>
+  <p><strong>MCP 官方文档：</strong><a href="https://modelcontextprotocol.io/docs/getting-started/intro">Model Context Protocol</a>（英文，无官方中文）。</p>
+  <p><strong>本课代码：</strong><a href="../../kbqa/mcp_client.py">kbqa/mcp_client.py</a> · <a href="../../mcp_servers/md_writer/server.py">server.py</a></p>
+
+  <div class="foot">
+    不清楚就直接问，比如"为什么每次调用都重启 server""stdio 会话能不能复用"。我是你的老师，问多基础都可以。
+  </div>
+
+</div>
+<script src="../assets/quiz.js"></script>
+</body>
+</html>
