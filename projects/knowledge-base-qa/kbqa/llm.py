@@ -23,6 +23,7 @@ from typing import Protocol, runtime_checkable
 from openai import OpenAI
 
 from kbqa.config import Settings
+from kbqa.models import ChatResult, ToolCall
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +46,17 @@ class LLMProvider(Protocol):
 
     def chat(self, messages: list[dict], temperature: float | None = None) -> str:
         """传入 messages，返回模型生成的文本。"""
+        ...
+
+    def chat_with_tools(
+        self,
+        messages: list[dict],
+        tools: list[dict],
+        temperature: float | None = None,
+    ) -> ChatResult:
+        """带工具 schema 调模型（spec-agent §19.6）。
+        `tools=[]` 时的行为必须与 `chat()` 等价。
+        """
         ...
 
 
@@ -110,6 +122,94 @@ class DashScopeChat:
         )
         return content
 
+    def chat_with_tools(
+        self,
+        messages: list[dict],
+        tools: list[dict],
+        temperature: float | None = None,
+    ) -> ChatResult:
+        """带工具调用能力的对话（spec-agent §19.6）。
+
+        Args:
+            messages: OpenAI 风格消息列表；可包含 role="tool" 的历史结果。
+            tools: OpenAI tools 格式的 schema 列表；空列表表示本轮不带工具。
+            temperature: 采样温度；None 表示使用配置中的 chat_temperature。
+
+        Returns:
+            ChatResult：模型文本（可能为 None）、本次请求的工具调用、finish_reason。
+
+        Raises:
+            LLMError: 调用失败，或模型既没有给文本也没有请求工具。
+                `code` 里带百炼的错误码，便于上层透传（§8）。
+        """
+        temp = self._default_temperature if temperature is None else temperature
+        started = time.perf_counter()
+
+        # tools=[] 时不传该字段：部分兼容实现会拒绝空数组；
+        # 这样也保证与 chat() 的请求体完全一致（§19.6）。
+        request: dict = {
+            "model": self._model,
+            "messages": messages,
+            "temperature": temp,
+            # 工具调用叠加思考模式时 tool_calls 更易解析失败（§4.2 坑 3 的延伸）
+            "extra_body": {"enable_thinking": self._enable_thinking},
+        }
+        if tools:
+            request["tools"] = tools
+
+        try:
+            resp = self._client.chat.completions.create(**request)
+        except Exception as exc:  # noqa: BLE001 —— 统一包装成带 code 的 LLMError
+            code = _error_code(exc)
+            logger.error(
+                "LLM 工具调用失败 code=%s 模型=%s 工具数=%d",
+                code,
+                self._model,
+                len(tools),
+            )
+            raise LLMError(f"LLM 工具调用失败 code={code}：{exc}", code) from exc
+
+        choice = resp.choices[0]
+        message = choice.message
+        content = message.content or None
+        tool_calls = [
+            ToolCall(id=tc.id, name=tc.function.name, arguments=tc.function.arguments)
+            for tc in (message.tool_calls or [])
+        ]
+        finish_reason = choice.finish_reason or ""
+
+        if content is None and not tool_calls:
+            # 与 chat() 保持一致：空回答视为失败，避免上层拿到无法解释的结果
+            logger.error(
+                "模型既未返回 content 也未请求工具（finish_reason=%s 模型=%s）",
+                finish_reason,
+                self._model,
+            )
+            raise LLMError("模型未返回 content 且未请求工具", "empty_content")
+
+        elapsed_ms = int((time.perf_counter() - started) * 1000)
+        logger.info(
+            "工具调用完成 模型=%s 温度=%s 消息数=%d 带工具=%d finish_reason=%s "
+            "答案长度=%d 工具调用数=%d 耗时=%dms",
+            self._model,
+            temp,
+            len(messages),
+            len(tools),
+            finish_reason,
+            len(content or ""),
+            len(tool_calls),
+            elapsed_ms,
+        )
+        # 参数是模型生成的 JSON 字符串，可能很长；按 §18.2 截断后再打日志
+        for tc in tool_calls:
+            logger.info("工具请求 name=%s 参数=%s", tc.name, _truncate(tc.arguments, 50))
+
+        return ChatResult(
+            content=content,
+            tool_calls=tool_calls,
+            finish_reason=finish_reason,
+        )
+
 
 def _error_code(exc: Exception) -> str:
     """从 SDK 异常里尽量挖出百炼返回的错误码（§8 要求向上透传 code）。
@@ -135,6 +235,11 @@ def _error_code(exc: Exception) -> str:
 
     status = getattr(exc, "status_code", None)
     return str(status) if status is not None else "unknown"
+
+
+def _truncate(text: str, limit: int = 50) -> str:
+    """截断长文本，避免日志被模型参数/问题淹没（§18.2）。"""
+    return text if len(text) <= limit else text[:limit] + "..."
 
 
 def get_llm(settings: Settings) -> LLMProvider:

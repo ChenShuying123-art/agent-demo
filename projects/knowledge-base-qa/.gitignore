@@ -19,6 +19,8 @@ data/uploads/*
 !data/uploads/.gitkeep
 data/index/*
 !data/index/.gitkeep
+data/exports/*
+!data/exports/.gitkeep
 
 # ---------- Node / Vue 前端 ----------
 node_modules/

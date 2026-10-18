@@ -19,7 +19,7 @@ from datetime import datetime
 
 from pydantic import BaseModel, Field
 
-from kbqa.models import Chunk, Document, QAResult, RerankResult, SearchResult
+from kbqa.models import AgentRun, Chunk, Document, QAResult, RerankResult, SearchResult
 
 # --------------------------------------------------------------------- 请求
 
@@ -52,6 +52,14 @@ class CompareRequest(BaseModel):
 
     question: str
     doc_ids: list[str] | None = None
+
+
+class AgentChatRequest(BaseModel):
+    """/api/agent/chat 请求体（spec-agent §19.9）。"""
+
+    question: str
+    skill: str | None = Field(default=None, description="指定 skill；缺省为自动选择")
+    history: list[dict] = Field(default_factory=list, description="可选的历史消息")
 
 
 # --------------------------------------------------------------------- 响应
@@ -132,6 +140,36 @@ class QAResultOut(BaseModel):
     latency_ms: int
 
 
+class AgentStepOut(BaseModel):
+    """一次工具调用的轨迹（spec-agent §19.9）。"""
+
+    index: int
+    tool: str
+    arguments: dict
+    result_text: str
+    ok: bool
+    elapsed_ms: int
+
+
+class AgentRunOut(BaseModel):
+    """一次 agent 对话的响应（spec-agent §19.9）。"""
+
+    answer: str
+    skill: str | None
+    steps: list[AgentStepOut]
+    stop_reason: str
+    tool_calls_count: int
+    rounds: int
+    latency_ms: int
+
+
+class SkillOut(BaseModel):
+    """可用 skill 的简要信息，供前端下拉展示。"""
+
+    name: str
+    description: str
+
+
 class HealthResponse(BaseModel):
     """健康检查响应：回显三个模型名（§8）。"""
 
@@ -208,4 +246,27 @@ def to_qa_out(result: QAResult) -> QAResultOut:
         candidates=[to_search_out(c) for c in result.candidates],
         used=[to_rerank_out(u) for u in result.used],
         latency_ms=result.latency_ms,
+    )
+
+
+def to_agent_run_out(run: AgentRun) -> AgentRunOut:
+    """AgentRun → AgentRunOut，逐条转换工具轨迹（供前端轨迹面板与对照实验）。"""
+    return AgentRunOut(
+        answer=run.answer,
+        skill=run.skill,
+        steps=[
+            AgentStepOut(
+                index=step.index,
+                tool=step.tool,
+                arguments=step.arguments,
+                result_text=step.result_text,
+                ok=step.ok,
+                elapsed_ms=step.elapsed_ms,
+            )
+            for step in run.steps
+        ],
+        stop_reason=run.stop_reason,
+        tool_calls_count=run.tool_calls_count,
+        rounds=run.rounds,
+        latency_ms=run.latency_ms,
     )

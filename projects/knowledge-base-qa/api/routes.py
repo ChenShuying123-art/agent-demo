@@ -18,20 +18,27 @@
 
 from __future__ import annotations
 
+import json
 import logging
+import queue
+import threading
+import time
 
 from fastapi import APIRouter, FastAPI, File, Request, UploadFile
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from openai import OpenAIError
 
 from kbqa import loaders
+from kbqa.agent import AgentRunner
 from kbqa.llm import LLMError
 from kbqa.pipeline import RAGPipeline
 from kbqa.prompts import PROMPT_STYLES
 from kbqa.vectorstore import VectorStore
 
 from api.schemas import (
+    AgentChatRequest,
+    AgentRunOut,
     CompareRequest,
     DeleteResponse,
     DocumentOut,
@@ -42,6 +49,8 @@ from api.schemas import (
     QAResultOut,
     RetrieveRequest,
     RetrieveResponse,
+    SkillOut,
+    to_agent_run_out,
     to_document_out,
     to_qa_out,
     to_rerank_out,
@@ -78,6 +87,11 @@ def _pipeline(request: Request) -> RAGPipeline:
 def _store(request: Request) -> VectorStore:
     """取出应用级单例向量库（删除文档时需要直接操作它）。"""
     return request.app.state.store
+
+
+def _agent(request: Request) -> AgentRunner:
+    """取出应用级单例 agent（在 main.create_app 中装配到 app.state）。"""
+    return request.app.state.agent
 
 
 # --------------------------------------------------------------------- 路由
@@ -187,6 +201,98 @@ def qa_compare(payload: CompareRequest, request: Request) -> list[QAResultOut]:
         payload.question, PROMPT_STYLES, payload.doc_ids
     )
     return [to_qa_out(result) for result in results]
+
+
+# ------------------------------------------------------------------ agent
+
+
+@router.get("/agent/skills", response_model=list[SkillOut])
+def agent_skills(request: Request) -> list[SkillOut]:
+    """列出可用 skill（spec-agent §19.9）。"""
+    loader = getattr(request.app.state, "skills", None)
+    if loader is None:
+        return []
+    return [
+        SkillOut(name=skill.name, description=skill.description)
+        for skill in loader.summaries()
+    ]
+
+
+@router.post("/agent/chat", response_model=AgentRunOut)
+def agent_chat(payload: AgentChatRequest, request: Request) -> AgentRunOut:
+    """一次 agent 对话（spec-agent §19.9）。
+
+    工具失败与 max_steps 都不是 HTTP 错误：
+        工具失败 → 200 + steps[].ok=false；
+        max_steps → 200 + stop_reason="max_steps"。
+
+    Raises:
+        ApiError(400): 指定的 skill 不存在。
+    """
+    try:
+        run = _agent(request).run(payload.question, payload.skill, payload.history)
+    except ValueError as exc:
+        # skill 不存在是用户输入错误；其他 ValueError 仍交给全局处理器（invalid_request）
+        if payload.skill is not None:
+            raise ApiError(400, "skill_not_found", f"skill 不存在：{payload.skill}") from exc
+        raise
+    return to_agent_run_out(run)
+
+
+@router.post("/agent/chat/stream")
+def agent_chat_stream(payload: AgentChatRequest, request: Request) -> StreamingResponse:
+    """SSE 流式对话（spec-agent §19.10，T27）。
+
+    事件类型：step_start / tool_call / tool_result / token / done（失败时 error）。
+    说明：`token` 是把最终答案按 8 字分片发出，用于前端逐字渲染；
+    模型本身仍是一次性返回，真正的原生 token 流不在本批范围内。
+    """
+    runner = _agent(request)
+    events: queue.Queue = queue.Queue()
+
+    def worker() -> None:
+        try:
+            run = runner.run(
+                payload.question,
+                payload.skill,
+                payload.history,
+                on_event=events.put,
+            )
+        except Exception as exc:  # noqa: BLE001 —— 错误也要以事件形式发出
+            events.put({"event": "error", "message": str(exc)})
+            events.put(None)
+            return
+
+        for offset in range(0, len(run.answer), 8):
+            events.put({"event": "token", "text": run.answer[offset : offset + 8]})
+            time.sleep(0.02)
+        events.put(
+            {
+                "event": "done",
+                "answer": run.answer,
+                "skill": run.skill,
+                "stop_reason": run.stop_reason,
+                "tool_calls_count": run.tool_calls_count,
+                "rounds": run.rounds,
+                "latency_ms": run.latency_ms,
+            }
+        )
+        events.put(None)
+
+    threading.Thread(target=worker, daemon=True).start()
+
+    def generator():
+        while True:
+            item = events.get()
+            if item is None:
+                break
+            yield f"event: {item['event']}\ndata: {json.dumps(item, ensure_ascii=False)}\n\n"
+
+    return StreamingResponse(
+        generator(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 # ----------------------------------------------------------------- 异常处理

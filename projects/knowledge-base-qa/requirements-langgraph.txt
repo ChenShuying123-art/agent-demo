@@ -1,0 +1,2 @@
+# LangGraph 对照版（T28/T29 才需要；AGENT_ENGINE=handwritten 时可不装）
+langgraph>=1,<2

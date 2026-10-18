@@ -55,6 +55,26 @@ class Settings(BaseSettings):
     retrieve_top_k: int = 20  # 召回候选数（追求"不漏"）
     rerank_top_n: int = 4  # 重排后送入 LLM 的数量
 
+    # Agent 工具
+    agent_max_steps: int = 5  # loop 上限，防死循环烧钱（§19.4）
+    agent_tool_result_max_chars: int = 2000  # 单个工具结果回填前的截断上限（§19.13）
+    agent_engine: str = "handwritten"  # handwritten | langgraph（§19.17）
+
+    # Agent 外网工具（批次 B）：endpoint/key 留空时工具返回明确标注的 mock 结果
+    web_search_api_key: str = ""
+    web_search_endpoint: str = ""
+    weather_api_key: str = ""
+    weather_endpoint: str = ""
+
+    # MCP（批次 C）：默认关闭；关闭时进程内不 import mcp（§19.12）
+    mcp_enabled: bool = False
+    mcp_servers: str = ""  # JSON 数组，见 .env.example
+    export_dir: Path = Path("data/exports")
+
+    # Skill（批次 D）：skill 目录与是否允许模型自动选择（§19.11）
+    skills_dir: Path = Path("skills")
+    skill_auto_select: bool = True
+
     # 日志
     log_level: str = "INFO"  # DEBUG | INFO | WARNING | ERROR（§18.2）
 

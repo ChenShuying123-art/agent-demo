@@ -65,3 +65,49 @@ class QAResult:
     candidates: list[SearchResult]  # 召回 20 条，供前端展示
     used: list[RerankResult]  # 重排后实际送进 LLM 的 4 条
     latency_ms: int
+
+
+@dataclass
+class ToolCall:
+    """模型请求调用某个工具（spec-agent §19.6）。"""
+
+    id: str
+    name: str
+    arguments: str  # 模型给的原始 JSON 字符串，解析失败由工具层兜住
+
+
+@dataclass
+class ChatResult:
+    """一次带工具的模型调用结果（spec-agent §19.6）。
+
+    `content` 可能为 None：模型只请求工具、还没给最终答案时就是这种情况。
+    """
+
+    content: str | None
+    tool_calls: list[ToolCall]
+    finish_reason: str
+
+
+@dataclass
+class AgentStep:
+    """agent loop 中一次工具调用的轨迹（spec-agent §19.8）。"""
+
+    index: int
+    tool: str
+    arguments: dict  # 已解析；解析失败记 {"_raw": "<原始字符串>"}
+    result_text: str  # 已按 AGENT_TOOL_RESULT_MAX_CHARS 截断
+    ok: bool
+    elapsed_ms: int
+
+
+@dataclass
+class AgentRun:
+    """一次 agent 请求的完整结果（spec-agent §19.8）。"""
+
+    answer: str
+    skill: str | None  # 本次实际使用的 skill（无则 None）
+    steps: list[AgentStep]
+    stop_reason: str  # "final_answer" | "max_steps"
+    tool_calls_count: int
+    rounds: int  # 循环轮数（每次调模型算一轮）
+    latency_ms: int
