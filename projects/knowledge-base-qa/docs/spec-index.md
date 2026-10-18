@@ -1,0 +1,64 @@
+# Spec 文档目录索引
+
+> 本项目 spec 的总入口。按"先 MVP、后 Agent 化"的顺序阅读。
+
+## 1. 文档清单
+
+| 文件 | 覆盖章节 | 内容 | 何时读 |
+|------|----------|------|--------|
+| [spec.md](./spec.md) | §1–§18 | MVP 设计契约：背景与目标、技术选型、架构、目录、核心模块、API、前端、提示词、评测、代码规范 | 开工前通读；实现 T0–T14 时按需查阅 |
+| [spec-agent.md](./spec-agent.md) | §19 | Agent 化设计契约：工具层、LLM 工具调用、agent loop、API 增量、前端轨迹、Skill、MCP、安全与日志 | 实现 T15–T27 前阅读 |
+
+> 拆分原则：`spec.md` 只保留 MVP 内容；Agent 化内容独立成 `spec-agent.md`，章节编号仍为 §19.x，原有交叉引用无需改写。
+
+## 2. spec.md 目录（MVP）
+
+| 章节 | 主题 |
+|------|------|
+| §1 | 项目背景与目标 |
+| §2 | 核心概念速览（学习用） |
+| §3 | 需求（功能 / 非功能） |
+| §4 | 技术选型（含三个必须知道的坑） |
+| §5 | 系统架构（分层与核心数据流） |
+| §6 | 目录结构 |
+| §7 | 核心模块设计（`config` / `models` / `loaders` / `chunking` / `embeddings` / `vectorstore` / `rerank` / `llm` / `prompts` / `pipeline` / `evaluate` / `logging_conf`） |
+| §8 | API 设计 |
+| §9 | 前端（Vue 3 + TS + Vite） |
+| §10 | RAG 链路详解（实现与学习的对照表） |
+| §11 | FAQ / 常见坑（实现时自查） |
+| §12 | 提示词设计规范 ★ |
+| §13 | 评测设计 |
+| §14 | 配置示例 `.env.example` |
+| §15 | 里程碑与验收标准（M0–M7） |
+| §16 | 后续扩展路线（Agent 化） |
+| §17 | 已确认决策与剩余待定项 |
+| §18 | 代码规范：注释、日志、Review（**贯穿全部任务**） |
+| §19 | 已拆分至 [spec-agent.md](./spec-agent.md) |
+
+## 3. spec-agent.md 目录（Agent 化）
+
+| 章节 | 主题 |
+|------|------|
+| §19.1 | 目标与非目标 |
+| §19.2 | 核心概念（tool / tool_call / agent loop / MCP / skill） |
+| §19.3 | 分层与数据流 |
+| §19.4 | 新增目录与配置 |
+| §19.5 | 工具层契约 `kbqa/tools/base.py` |
+| §19.6 | LLM 工具调用契约（`kbqa/llm.py` 扩展） |
+| §19.7 | 工具清单与契约 |
+| §19.8 | agent loop 契约 `kbqa/agent.py` |
+| §19.9 | API 契约（增量） |
+| §19.10 | 前端（轨迹 / skill 选择 / 流式） |
+| §19.11 | Skill 机制 |
+| §19.12 | MCP 集成 |
+| §19.13 | 安全与日志（增量，并入 §18） |
+| §19.14 | 对照实验（固定链路 vs Agent 自主） |
+| §19.15 | 里程碑与验收（M8–M13） |
+| §19.16 | 待定项 |
+| §19.17 | Agent loop 双实现：手写 vs LangGraph |
+
+## 4. 相关文档
+
+- 任务拆解索引：[tasks-index.md](./tasks-index.md)
+- MVP 任务卡片：[tasks.md](./tasks.md)
+- Agent 任务卡片：[tasks-agent.md](./tasks-agent.md)
