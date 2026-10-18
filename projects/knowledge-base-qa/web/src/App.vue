@@ -4,16 +4,28 @@
  * 这样组件保持"展示型"，出错处理、loading、刷新逻辑只有一份。
  */
 import { onMounted, ref } from 'vue'
-import { ApiError, api, type AskOptions, type DocumentItem, type Health, type QAResult } from './api'
+import {
+  ApiError,
+  api,
+  type AgentRun,
+  type AskOptions,
+  type DocumentItem,
+  type Health,
+  type QAResult,
+  type SkillInfo,
+} from './api'
 import UploadPanel from './components/UploadPanel.vue'
 import DocumentList from './components/DocumentList.vue'
 import AskPanel from './components/AskPanel.vue'
 import AnswerCard from './components/AnswerCard.vue'
+import AgentPanel from './components/AgentPanel.vue'
 
 const health = ref<Health | null>(null)
 const documents = ref<DocumentItem[]>([])
 const selected = ref<string[]>([])
 const results = ref<QAResult[]>([])
+const agentResult = ref<AgentRun | null>(null)
+const skills = ref<SkillInfo[]>([])
 const errorMsg = ref('')
 const busy = ref(false)
 
@@ -42,6 +54,7 @@ async function refreshDocuments(): Promise<void> {
 onMounted(() => {
   void run(async () => {
     health.value = await api.health()
+    skills.value = await api.agentSkills()
     await refreshDocuments()
   })
 })
@@ -73,6 +86,53 @@ function onAsk(opts: AskOptions): void {
       opts.style === 'all'
         ? await api.askAllStyles(opts.question, selected.value)
         : [await api.ask(opts.question, opts.style, selected.value, opts.useRerank)]
+  })
+}
+
+function onAgentAsk(payload: { question: string; skill: string | null; stream: boolean }): void {
+  void run(async () => {
+    if (!payload.stream) {
+      agentResult.value = await api.agentChat(payload.question, payload.skill)
+      return
+    }
+
+    // 流式：先放一个空结果，随后按事件增量填充（Vue 会实时重渲染）
+    agentResult.value = {
+      answer: '',
+      skill: payload.skill,
+      steps: [],
+      stop_reason: '',
+      tool_calls_count: 0,
+      rounds: 0,
+      latency_ms: 0,
+    }
+    const current = agentResult.value as AgentRun
+
+    await api.agentChatStream(payload.question, payload.skill, (ev) => {
+      if (ev.event === 'step_start') {
+        current.rounds = ev.round
+      } else if (ev.event === 'tool_result') {
+        current.steps.push({
+          index: ev.index,
+          tool: ev.tool,
+          arguments: ev.arguments,
+          result_text: ev.result_text,
+          ok: ev.ok,
+          elapsed_ms: ev.elapsed_ms,
+        })
+      } else if (ev.event === 'token') {
+        current.answer += ev.text
+      } else if (ev.event === 'done') {
+        current.answer = ev.answer
+        current.skill = ev.skill
+        current.stop_reason = ev.stop_reason
+        current.tool_calls_count = ev.tool_calls_count
+        current.rounds = ev.rounds
+        current.latency_ms = ev.latency_ms
+      } else if (ev.event === 'error') {
+        throw new ApiError('stream_error', ev.message)
+      }
+    })
   })
 }
 </script>
@@ -107,6 +167,13 @@ function onAsk(opts: AskOptions): void {
         <AnswerCard v-for="(r, i) in results" :key="i" :result="r" />
       </div>
     </section>
+
+    <AgentPanel
+      :busy="busy"
+      :result="agentResult"
+      :skills="skills"
+      @ask="onAgentAsk"
+    />
 
     <footer class="foot">
       前端仅调用 <code>/api/*</code>；两阶段检索的排名变化见每张答案卡里的「召回 → 重排」面板。

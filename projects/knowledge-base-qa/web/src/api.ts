@@ -55,6 +55,58 @@ export interface QAResult {
   latency_ms: number
 }
 
+/** agent 一次工具调用轨迹（对应后端 AgentStepOut） */
+export interface AgentStep {
+  index: number
+  tool: string
+  arguments: Record<string, unknown>
+  result_text: string
+  ok: boolean
+  elapsed_ms: number
+}
+
+/** agent 一次对话的结果（对应后端 AgentRunOut） */
+export interface AgentRun {
+  answer: string
+  skill: string | null
+  steps: AgentStep[]
+  stop_reason: string
+  tool_calls_count: number
+  rounds: number
+  latency_ms: number
+}
+
+/** 可用 skill（对应后端 SkillOut） */
+export interface SkillInfo {
+  name: string
+  description: string
+}
+
+/** SSE 事件（T27） */
+export type AgentStreamEvent =
+  | { event: 'step_start'; round: number }
+  | { event: 'tool_call'; index: number; tool: string; arguments: string }
+  | {
+      event: 'tool_result'
+      index: number
+      tool: string
+      arguments: Record<string, unknown>
+      result_text: string
+      ok: boolean
+      elapsed_ms: number
+    }
+  | { event: 'token'; text: string }
+  | {
+      event: 'done'
+      answer: string
+      skill: string | null
+      stop_reason: string
+      tool_calls_count: number
+      rounds: number
+      latency_ms: number
+    }
+  | { event: 'error'; message: string }
+
 /** /api/retrieve 的响应 */
 export interface RetrieveResult {
   candidates: SearchResult[]
@@ -209,5 +261,77 @@ export const api = {
       '/qa/compare',
       jsonBody({ question: question.slice(0, MAX_QUESTION_LEN), doc_ids: cleanDocIds(docIds) }),
     )
+  },
+
+  /** 列出可用 skill（T26 之前后端返回空数组） */
+  agentSkills(): Promise<SkillInfo[]> {
+    return request<SkillInfo[]>('/agent/skills')
+  },
+
+  /** 一次 agent 对话：模型自主决定是否调用工具 */
+  agentChat(question: string, skill: string | null): Promise<AgentRun> {
+    return request<AgentRun>(
+      '/agent/chat',
+      jsonBody({
+        question: question.slice(0, MAX_QUESTION_LEN),
+        skill,
+        history: [],
+      }),
+    )
+  },
+
+  /** 流式 agent 对话（SSE）；逐事件回调，回调抛错会中断本次流 */
+  async agentChatStream(
+    question: string,
+    skill: string | null,
+    onEvent: (ev: AgentStreamEvent) => void,
+  ): Promise<void> {
+    let resp: Response
+    try {
+      resp = await fetch(
+        '/api/agent/chat/stream',
+        jsonBody({
+          question: question.slice(0, MAX_QUESTION_LEN),
+          skill,
+          history: [],
+        }),
+      )
+    } catch (err) {
+      throw new ApiError('network_error', `无法连接后端：${(err as Error).message}`)
+    }
+
+    if (!resp.ok) {
+      const text = await resp.text()
+      let code = String(resp.status)
+      let message = resp.statusText || `请求失败（HTTP ${resp.status}）`
+      try {
+        const envelope = (JSON.parse(text) as { error?: { code?: string; message?: string } }).error
+        code = envelope?.code ?? code
+        message = envelope?.message ?? message
+      } catch {
+        // 非 JSON 错误页：保留状态码与人话
+      }
+      throw new ApiError(code, message)
+    }
+
+    const reader = resp.body?.getReader()
+    if (!reader) {
+      throw new ApiError('stream_error', '当前浏览器不支持流式响应')
+    }
+
+    const decoder = new TextDecoder()
+    let buffer = ''
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+      buffer += decoder.decode(value, { stream: true })
+      const blocks = buffer.split('\n\n')
+      buffer = blocks.pop() ?? ''
+      for (const block of blocks) {
+        const dataLine = block.split('\n').find((line) => line.startsWith('data: '))
+        if (!dataLine) continue
+        onEvent(JSON.parse(dataLine.slice(6)) as AgentStreamEvent)
+      }
+    }
   },
 }
