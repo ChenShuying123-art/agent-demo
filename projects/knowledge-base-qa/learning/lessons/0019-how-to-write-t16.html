@@ -120,6 +120,77 @@ for tc in tool_calls:
     logger.info("工具请求 name=%s 参数=%s", tc.name, _truncate(tc.arguments, 50))</code></pre>
   <p>工具参数可能很长（比如把整段文档塞进参数），也可能含敏感信息。按 §18.2：<strong>可以打印，但必须截断</strong>。这里统一截到 50 字符 + <code>...</code>。</p>
 
+  <h2>附：代码全流程拆解</h2>
+  <p>T16 只做一件事：<strong>把 messages + tools 发出去，把响应解析成统一的 ChatResult</strong>。它不执行工具，也不决定要不要继续循环。</p>
+
+  <table>
+    <thead><tr><th>阶段</th><th>输入</th><th>输出</th></tr></thead>
+    <tbody>
+      <tr><td>① 组装请求</td><td>messages、tools、temperature</td><td>request dict</td></tr>
+      <tr><td>② 调模型</td><td>request</td><td>SDK response</td></tr>
+      <tr><td>③ 解析</td><td>response.choices[0].message</td><td><code>content</code> + <code>tool_calls</code> + <code>finish_reason</code></td></tr>
+      <tr><td>④ 失败判定</td><td>content 为 None 且无 tool_calls</td><td><code>LLMError("empty_content")</code></td></tr>
+      <tr><td>⑤ 返回</td><td>—</td><td><code>ChatResult</code></td></tr>
+    </tbody>
+  </table>
+
+  <h3>1. 组装请求：tools 为空就不传</h3>
+  <pre><code>request = {
+    "model": self._model,
+    "messages": messages,
+    "temperature": temp,
+    "extra_body": {"enable_thinking": self._enable_thinking},
+}
+if tools:
+    request["tools"] = tools
+
+resp = self._client.chat.completions.create(**request)</code></pre>
+  <p><strong>为什么 <code>tools=[]</code> 时不传这个字段：</strong>部分兼容实现会拒绝空数组；不传也能保证请求体与 <code>chat()</code> 完全一致，行为可预测。</p>
+
+  <h3>2. 解析响应：模型可能只给工具，不给文本</h3>
+  <pre><code>choice = resp.choices[0]
+message = choice.message
+content = message.content or None
+tool_calls = [
+    ToolCall(id=tc.id, name=tc.function.name, arguments=tc.function.arguments)
+    for tc in (message.tool_calls or [])
+]
+finish_reason = choice.finish_reason or ""</code></pre>
+  <p><code>content</code> 在工具调用场景经常是 <code>None</code>；<code>arguments</code> 是模型生成的 JSON <strong>字符串</strong>，T16 不解析它，交给 T18 执行前再 <code>json.loads</code>。</p>
+
+  <h3>3. 失败判定：既没文本也没工具</h3>
+  <pre><code>if content is None and not tool_calls:
+    raise LLMError("模型未返回 content 且未请求工具", "empty_content")</code></pre>
+  <p>如果只判断 <code>content is None</code>，正常的工具调用会被误判为失败；如果只判断 <code>not tool_calls</code>，又漏掉空回答。两个条件必须同时成立。</p>
+
+  <h3>4. 日志：参数必须截断</h3>
+  <pre><code>for tc in tool_calls:
+    logger.info("工具请求 name=%s 参数=%s", tc.name, _truncate(tc.arguments, 50))</code></pre>
+  <p>工具参数是模型生成的，可能很长；日志只保留前 50 字，避免淹没关键信息，也避免把整段用户数据写进日志。</p>
+
+  <h3>5. 一次调用的完整流程</h3>
+  <ol>
+    <li>T18 准备 <code>messages</code>（system / user / 历史 tool 消息）；</li>
+    <li>T18 调 <code>registry.schemas()</code> 得到 <code>tools</code>；</li>
+    <li><code>chat_with_tools(messages, tools)</code> 发请求；</li>
+    <li>模型返回 <code>tool_calls</code> → T18 逐个执行；</li>
+    <li>T18 把每个结果作为 <code>role="tool"</code> 消息 append；</li>
+    <li>再次调用 <code>chat_with_tools</code>，直到模型不再请求工具。</li>
+  </ol>
+
+  <h3>6. 失败路径</h3>
+  <table>
+    <thead><tr><th>情况</th><th>T16 的行为</th></tr></thead>
+    <tbody>
+      <tr><td>SDK 抛异常</td><td>包装成带 <code>code</code> 的 <code>LLMError</code></td></tr>
+      <tr><td>空回答</td><td><code>LLMError("empty_content")</code></td></tr>
+      <tr><td>模型返回多个 tool_calls</td><td>按原顺序映射成多个 <code>ToolCall</code></td></tr>
+      <tr><td>arguments 不是合法 JSON</td><td>T16 不解析；T18 执行前发现并记 <code>ok=False</code></td></tr>
+    </tbody>
+  </table>
+
+  <p><strong>衔接：</strong>T15 提供 schema；T16 负责"发和收"；T18 才是"看到 tool_calls 后怎么办"。</p>
+
   <h2>八、实测数据</h2>
   <table>
     <thead><tr><th>验收点</th><th>实测</th></tr></thead>

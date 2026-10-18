@@ -57,6 +57,88 @@ from mcp import ClientSession
     当工具调用频率变高、延迟不可接受时，再引入"后台事件循环 + 长连接"。本批优先可观测性与实现简单，先不做连接池。
   </div>
 
+  <h2>附：代码全流程拆解</h2>
+  <p>T25 的流程：<strong>读配置 → 启动 server → tools/list → 包装成 Tool → 注册 → 调用时 tools/call</strong>。核心目标是让远程工具和本地工具在 registry 里长得一样。</p>
+
+  <table>
+    <thead><tr><th>阶段</th><th>代码</th><th>产出</th></tr></thead>
+    <tbody>
+      <tr><td>① 开关</td><td><code>if not settings.mcp_enabled: return</code></td><td>关闭时不 import mcp</td></tr>
+      <tr><td>② 配置</td><td><code>_server_specs</code></td><td>name / command / args</td></tr>
+      <tr><td>③ 发现</td><td><code>tools/list</code></td><td>远程工具列表</td></tr>
+      <tr><td>④ 包装</td><td><code>Tool(name=f"{server}.{tool}", ...)</code></td><td>本地 Tool</td></tr>
+      <tr><td>⑤ 注册</td><td><code>registry.register</code></td><td>与本地工具同表</td></tr>
+      <tr><td>⑥ 调用</td><td><code>tools/call</code></td><td>文本结果</td></tr>
+    </tbody>
+  </table>
+
+  <h3>1. 主循环：按 server 失败隔离</h3>
+  <pre><code>for spec in specs:
+    server_name = spec["name"]
+    try:
+        remote_tools = _list_tools_sync(settings, spec)
+    except Exception as exc:
+        logger.warning("MCP server 启动失败 name=%s 原因=%s", server_name, exc)
+        continue
+
+    for remote in remote_tools:
+        full_name = f"{server_name}.{remote.name}"
+        registry.register(Tool(
+            name=full_name,
+            description=remote.description,
+            parameters=remote.inputSchema,
+            handler=_make_handler(settings, spec, remote.name, full_name),
+        ))</code></pre>
+  <p><strong>失败隔离：</strong>一个 server 崩了只丢这批工具；本地工具和 agent 照常工作。这是"可选依赖"的底线。</p>
+
+  <h3>2. tools/list：一次握手，拿清单</h3>
+  <pre><code>async def _list_tools_async(settings, spec):
+    ClientSession, StdioServerParameters, stdio_client = _mcp_imports()
+    params = StdioServerParameters(
+        command=spec["command"],
+        args=spec["args"],
+        env=_subprocess_env(settings),
+    )
+    async with stdio_client(params) as (read, write):
+        async with ClientSession(read, write) as session:
+            await session.initialize()
+            result = await session.list_tools()
+            return list(result.tools)</code></pre>
+  <p><code>_subprocess_env</code> 把 <code>EXPORT_DIR</code> 转成绝对路径，避免子进程工作目录不同导致写错地方。</p>
+
+  <h3>3. tools/call：每次一个新会话</h3>
+  <pre><code>async with stdio_client(params) as (read, write):
+    async with ClientSession(read, write) as session:
+        await session.initialize()
+        result = await session.call_tool(
+            tool_name, arguments, read_timeout_seconds=30,
+        )
+
+parts = [getattr(item, "text", "") for item in result.content if getattr(item, "text", None)]
+return "\n".join(parts) or "(MCP 工具没有返回文本)"</code></pre>
+  <p>demo 选择"每次调用重建会话"：实现简单、隔离好；代价是每次多几秒握手。频率高了再改常驻会话。</p>
+
+  <h3>4. handler：把远程调用包装成本地函数</h3>
+  <pre><code>def handler(args: dict) -&gt; ToolResult:
+    try:
+        text = _call_tool_sync(settings, spec, remote_name, args)
+    except Exception as exc:
+        return ToolResult(text=f"MCP 工具调用失败：{exc}")
+    return ToolResult(text=text)</code></pre>
+  <p>agent loop 完全不知道 <code>md_writer.write_markdown</code> 在另一个进程里；它只看到 <code>Tool.handler(args)</code>。</p>
+
+  <h3>5. 失败路径</h3>
+  <table>
+    <thead><tr><th>情况</th><th>行为</th></tr></thead>
+    <tbody>
+      <tr><td><code>MCP_ENABLED=false</code></td><td>直接返回，不 import mcp</td></tr>
+      <tr><td><code>MCP_SERVERS</code> 非法 JSON</td><td>WARNING，跳过</td></tr>
+      <tr><td>server 启动失败</td><td>WARNING，只丢该批工具</td></tr>
+      <tr><td>工具名撞车</td><td>WARNING，跳过该工具</td></tr>
+      <tr><td>调用超时/崩溃</td><td><code>ToolResult</code> 错误文本，loop 继续</td></tr>
+    </tbody>
+  </table>
+
   <h2>六、实测数据</h2>
   <table>
     <thead><tr><th>验收点</th><th>实测</th></tr></thead>

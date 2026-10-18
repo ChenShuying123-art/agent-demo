@@ -53,6 +53,92 @@ if city not in _MOCK_CITIES:
 温度：18~25°C</code></pre>
   <p>三个字段分行，模型能直接引用。`days > 1` 时按天重复"日期/天气/温度"块。</p>
 
+  <h2>附：代码全流程拆解</h2>
+  <p>T23 的流程与 T22 同构：<strong>收敛参数 → mock/real 分支 → 取数据 → 统一字段 → 格式化</strong>。差异点是业务校验：城市不存在要给出明确错误。</p>
+
+  <table>
+    <thead><tr><th>阶段</th><th>代码</th><th>产出</th></tr></thead>
+    <tbody>
+      <tr><td>① 参数</td><td><code>city</code> / <code>_parse_days</code></td><td>city + days（1–7）</td></tr>
+      <tr><td>② 分支</td><td>endpoint/key 是否为空</td><td>mock 或 real</td></tr>
+      <tr><td>③ 取数</td><td><code>_mock_forecast</code> 或 <code>httpx.get</code></td><td>每日天气列表</td></tr>
+      <tr><td>④ 校验</td><td>城市是否认识 / 返回是否为空</td><td>错误文本或数据</td></tr>
+      <tr><td>⑤ 格式化</td><td><code>_format</code></td><td>城市 / 日期 / 天气 / 温度</td></tr>
+      <tr><td>⑥ 返回</td><td><code>ToolResult</code></td><td>text + data</td></tr>
+    </tbody>
+  </table>
+
+  <h3>1. 工厂 + handler 骨架</h3>
+  <pre><code>def build_weather_tool(settings: Settings) -&gt; Tool:
+    @tool(name="get_weather", description="...", parameters={...})
+    def get_weather(args: dict) -&gt; ToolResult:
+        city = str(args.get("city") or "").strip()
+        days = _parse_days(args.get("days"))
+
+        if not city:
+            return ToolResult(text="城市不能为空。")
+
+        endpoint = settings.weather_endpoint.strip()
+        api_key = settings.weather_api_key.strip()
+        if not endpoint or not api_key:
+            if city not in _MOCK_CITIES:
+                return ToolResult(text=f"未找到城市：{city} 的天气信息。")
+            forecast = _mock_forecast(city, days)
+            return ToolResult(text=_format(city, forecast, "mock"), data={...})
+        ...</code></pre>
+  <p><strong>mock 也做业务校验：</strong>只认识小城市表，其它城市按"不存在"处理。否则错误路径永远测不到。</p>
+
+  <h3>2. mock 预报：确定性数据</h3>
+  <pre><code>def _mock_forecast(city: str, days: int) -&gt; list[dict]:
+    weather, temp = _MOCK_CITIES[city]
+    today = date.today()
+    return [
+        {
+            "date": (today + timedelta(days=offset)).isoformat(),
+            "weather": weather,
+            "temp": temp,
+        }
+        for offset in range(days)
+    ]</code></pre>
+  <p>mock 用当前日期生成，保证"今天/明天"的日期是连续的；输出里明确标注 <code>（mock）</code>。</p>
+
+  <h3>3. 真实请求与解析</h3>
+  <pre><code>resp = httpx.get(
+    endpoint,
+    params={"city": city, "days": days},
+    headers={"Authorization": f"Bearer {api_key}"},
+    timeout=_TIMEOUT_SECONDS,
+)
+resp.raise_for_status()
+forecast = _parse_response(resp.json(), days)</code></pre>
+  <pre><code>items = payload.get("days") or payload.get("forecast") or payload.get("data") or []
+for item in items[:days]:
+    forecast.append({
+        "date": str(item.get("date") or item.get("day") or ""),
+        "weather": str(item.get("weather") or item.get("text") or ""),
+        "temp": str(item.get("temp") or item.get("temperature") or ""),
+    })</code></pre>
+  <p>与 T22 一样，字段映射集中在 <code>_parse_response</code>；换供应商不改 handler。</p>
+
+  <h3>4. 输出：按天分块</h3>
+  <pre><code>城市：北京（mock）
+
+日期：2026-10-18
+天气：晴
+温度：18~25°C</code></pre>
+  <p><code>days &gt; 1</code> 时重复"日期/天气/温度"块；模型可以直接引用其中某一天。</p>
+
+  <h3>5. 失败路径</h3>
+  <table>
+    <thead><tr><th>情况</th><th>行为</th></tr></thead>
+    <tbody>
+      <tr><td>city 为空</td><td>"城市不能为空"</td></tr>
+      <tr><td>mock 中不存在的城市</td><td>"未找到城市：..."</td></tr>
+      <tr><td>真实接口无数据</td><td>"未找到城市：..."</td></tr>
+      <tr><td>超时 / 非 2xx</td><td>"get_weather 调用失败：..."，不抛异常</td></tr>
+    </tbody>
+  </table>
+
   <h2>五、实测数据</h2>
   <table>
     <thead><tr><th>验收点</th><th>实测</th></tr></thead>

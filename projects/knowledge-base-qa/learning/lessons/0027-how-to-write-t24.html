@@ -57,6 +57,72 @@ if candidate.is_absolute() or candidate.name != name or ".." in candidate.parts:
     把 <code>../../evil.md</code> 洗成 <code>evil.md</code> 看似友好，但会让调用方<strong>以为自己成功了</strong>。这里的工具选择了更明确的行为：<strong>拒绝并说明原因</strong>，模型下一轮可以改成合法文件名。
   </div>
 
+  <h2>附：代码全流程拆解</h2>
+  <p>T24 的流程：<strong>启动 stdio server → 注册工具 → client tools/list → tools/call → 校验参数 → 写文件 → 返回路径</strong>。真正的业务只有"写"，其余都是边界。</p>
+
+  <table>
+    <thead><tr><th>阶段</th><th>代码</th><th>产出</th></tr></thead>
+    <tbody>
+      <tr><td>① 启动</td><td><code>server.run()</code></td><td>监听 stdio</td></tr>
+      <tr><td>② 注册</td><td><code>@server.tool(...)</code></td><td>工具名 + 入参 schema</td></tr>
+      <tr><td>③ 发现</td><td>client <code>tools/list</code></td><td><code>["write_markdown"]</code></td></tr>
+      <tr><td>④ 调用</td><td>client <code>tools/call</code></td><td>filename / content</td></tr>
+      <tr><td>⑤ 校验</td><td>basename / 绝对值 / .. / 长度</td><td>合法文件名或拒绝文本</td></tr>
+      <tr><td>⑥ 写入</td><td><code>target.write_text</code></td><td>绝对路径</td></tr>
+    </tbody>
+  </table>
+
+  <h3>1. 注册：函数签名就是 schema</h3>
+  <pre><code>server = MCPServer("md_writer")
+
+@server.tool(name="write_markdown", description="...")
+def write_markdown(filename: str, content: str) -&gt; str:
+    ...
+server.run()</code></pre>
+  <p>MCP SDK 会根据类型注解生成 <code>inputSchema</code>；这与本地工具"手写 JSON Schema"不同，但对外都是同一种"名字 + 参数说明"。</p>
+
+  <h3>2. 写盘边界：四道检查</h3>
+  <pre><code>name = (filename or "").strip()
+if not name:
+    return "写入失败：filename 不能为空。"
+
+candidate = Path(name)
+if candidate.is_absolute() or candidate.name != name or ".." in candidate.parts:
+    return "写入失败：filename 只能是纯文件名，不能包含路径或 ..。"
+
+if len(content or "") &gt; _MAX_CONTENT_CHARS:
+    return f"写入失败：content 超过上限 {_MAX_CONTENT_CHARS} 字符。"</code></pre>
+  <p><code>candidate.name != name</code> 一次拦住 <code>../../evil.md</code>、<code>C:\evil.md</code>、<code>a/b.md</code>；空值、超长也各自有明确错误。</p>
+
+  <h3>3. 双保险：解析后仍必须在导出目录</h3>
+  <pre><code>_EXPORT_DIR.mkdir(parents=True, exist_ok=True)
+target = _EXPORT_DIR / name
+target.resolve().relative_to(_EXPORT_DIR.resolve())
+target.write_text(content or "", encoding="utf-8")
+return f"已写入：{target.resolve()}"</code></pre>
+  <p>字符串检查可能被符号链接绕过，<code>resolve().relative_to</code> 再用真实路径确认一次；失败会抛 <code>ValueError</code>，被外层转成"写入失败"。</p>
+
+  <h3>4. 一次调用的完整流程</h3>
+  <ol>
+    <li>client 启动子进程 <code>python mcp_servers/md_writer/server.py</code>；</li>
+    <li><code>initialize</code> 握手；</li>
+    <li><code>tools/list</code> 发现 <code>write_markdown</code>；</li>
+    <li><code>tools/call</code> 传入 <code>{"filename":"a.md","content":"# hi"}</code>；</li>
+    <li>server 校验、写入、返回文本；</li>
+    <li>client 把文本包装成 <code>ToolResult</code>（T25）。</li>
+  </ol>
+
+  <h3>5. 失败路径</h3>
+  <table>
+    <thead><tr><th>情况</th><th>返回</th></tr></thead>
+    <tbody>
+      <tr><td>filename 为空</td><td>"写入失败：filename 不能为空"</td></tr>
+      <tr><td>包含路径 / 盘符 / ..</td><td>"写入失败：只能是纯文件名"</td></tr>
+      <tr><td>content 超长</td><td>"写入失败：content 超过上限"</td></tr>
+      <tr><td>磁盘错误</td><td>"写入失败：..."（不抛到协议层）</td></tr>
+    </tbody>
+  </table>
+
   <h2>四、实测数据</h2>
   <table>
     <thead><tr><th>验收点</th><th>实测</th></tr></thead>

@@ -30,6 +30,83 @@
   </table>
   <p>唯一变量：<code>handwritten</code> vs <code>langgraph</code>。</p>
 
+  <h2>附：代码全流程拆解</h2>
+  <p>T29 的代码是 T21 的"双引擎版"：<strong>共用依赖 → 两版各跑一遍 → 收集指标 → 渲染差异</strong>。它不修改任何一版 loop。</p>
+
+  <table>
+    <thead><tr><th>阶段</th><th>代码</th><th>产出</th></tr></thead>
+    <tbody>
+      <tr><td>① 装配</td><td><code>build_components()</code></td><td>同一个 llm / registry</td></tr>
+      <tr><td>② 真实双跑</td><td><code>hand.run</code> + <code>graph.run</code></td><td>每题两组 AgentRun</td></tr>
+      <tr><td>③ 边界场景</td><td><code>run_max_steps()</code></td><td>两版 stop/rounds/steps</td></tr>
+      <tr><td>④ 渲染</td><td><code>render(rows, boundary)</code></td><td>Markdown 表格 + 差异</td></tr>
+    </tbody>
+  </table>
+
+  <h3>1. 装配：两版共用同一套工具</h3>
+  <pre><code>def build_components():
+    store = VectorStore.load(settings.data_dir / "index")
+    llm = get_llm(settings)
+    pipeline = RAGPipeline(...)
+
+    registry = ToolRegistry()
+    registry.register(get_datetime)
+    registry.register(build_kb_tool(pipeline, ...))
+    return llm, registry</code></pre>
+  <p>两个 runner 拿到同一个 <code>llm</code> 与 <code>registry</code>，确保差异只来自编排层。</p>
+
+  <h3>2. 真实双跑：同一题，两个引擎</h3>
+  <pre><code>hand = AgentRunner(settings, registry, llm)
+graph = GraphAgentRunner(settings, registry, llm)
+
+for question in questions:
+    h = hand.run(question)
+    g = graph.run(question)
+
+    rows.append({
+        "question": question,
+        "hand": h,
+        "graph": g,
+        "same_tools": [s.tool for s in h.steps] == [s.tool for s in g.steps],
+        "same_answer": h.answer == g.answer,
+    })</code></pre>
+  <p>记录工具序列与答案是否一致，而不是只比较耗时；模型采样会让答案有波动。</p>
+
+  <h3>3. 确定性边界：max_steps</h3>
+  <pre><code>class ScriptedLLM:
+    def chat_with_tools(self, messages, tools, temperature=None):
+        return ChatResult(None, [ToolCall(..., "get_datetime", "{}")], "tool_calls")
+
+short = settings.model_copy(update={"agent_max_steps": 3})
+h = AgentRunner(short, registry, ScriptedLLM()).run("一直调工具")
+g = GraphAgentRunner(short, registry, ScriptedLLM()).run("一直调工具")</code></pre>
+  <p>脚本 LLM 每轮都请求工具，排除模型随机性；两版都应停在 3 轮、2 步，证明控制流等价。</p>
+
+  <h3>4. 渲染：数据驱动，不手写结论</h3>
+  <pre><code>for row in rows:
+    for label, run in (("手写", row["hand"]), ("LangGraph", row["graph"])):
+        tools = ", ".join(s.tool for s in run.steps) or "未调用"
+        lines.append(f"| {row['index']} | ... | {label} | {tools} | ... |")
+
+if not row["same_tools"]:
+    differences.append("- 工具序列不同：...")
+if not row["same_answer"]:
+    differences.append("- 答案不同：...")</code></pre>
+  <p>"差异"从数据里自动提取；代码量用 <code>loc()</code> 统计，避免凭感觉说"框架更短"。</p>
+
+  <h3>5. 指标与结论</h3>
+  <table>
+    <thead><tr><th>维度</th><th>看什么</th></tr></thead>
+    <tbody>
+      <tr><td>工具序列</td><td>两版选择是否一致；不一致时先怀疑模型采样</td></tr>
+      <tr><td>步数 / 轮数</td><td>控制流是否等价</td></tr>
+      <tr><td>耗时</td><td>只能作参考，受模型与工具耗时影响</td></tr>
+      <tr><td>代码量 / 依赖</td><td>框架的抽象成本与启动成本</td></tr>
+    </tbody>
+  </table>
+
+  <p><strong>衔接：</strong>T29 是这门课的终点；它把 T21 的对照方法复用到了"实现方式"层面。</p>
+
   <h2>二、实测结果</h2>
   <table>
     <thead><tr><th>问题</th><th>手写</th><th>LangGraph</th></tr></thead>

@@ -69,6 +69,81 @@ def _filter_schemas(base, allowed, load_skill_available):
   <h2>五、解析 front-matter 为什么不用 PyYAML</h2>
   <p>格式很简单（三行 key: value），自己解析就够，避免为一个 demo 引入新依赖。代价是只支持<strong>扁平结构</strong>；如果以后要嵌套字段，再换 YAML。</p>
 
+  <h2>附：代码全流程拆解</h2>
+  <p>T26 的流程分两条：<strong>显式指定</strong>在 loop 开始前就注入正文并收窄工具；<strong>自动选择</strong>先给目录，模型调 <code>load_skill</code> 后再注入并收窄。</p>
+
+  <table>
+    <thead><tr><th>阶段</th><th>显式</th><th>自动</th></tr></thead>
+    <tbody>
+      <tr><td>① 解析</td><td><code>_resolve_skill(name)</code></td><td>无，先列清单</td></tr>
+      <tr><td>② system</td><td>注入正文</td><td>注入 name + description 清单</td></tr>
+      <tr><td>③ 工具集</td><td><code>allowed_tools = skill.tools</code></td><td>全量 + <code>load_skill</code></td></tr>
+      <tr><td>④ 加载</td><td>—</td><td>模型调用 <code>load_skill</code></td></tr>
+      <tr><td>⑤ 收窄</td><td>启动即生效</td><td>加载后对后续轮次生效</td></tr>
+    </tbody>
+  </table>
+
+  <h3>1. 解析 SKILL.md：front-matter + 正文</h3>
+  <pre><code>parts = text.split("---", 2)
+meta = {}
+for line in parts[1].splitlines():
+    if ":" in line:
+        key, value = line.split(":", 1)
+        meta[key.strip().lower()] = value.strip()
+
+name = meta.get("name") or path.parent.name
+description = meta.get("description", "").strip()
+body = parts[2].strip()
+tools = _parse_tools(meta.get("tools", ""))</code></pre>
+  <p>只支持扁平字段（name / description / tools），所以不引入 PyYAML；tools 支持 <code>[a, b]</code> 或逗号分隔。</p>
+
+  <h3>2. 显式指定：启动即收窄</h3>
+  <pre><code>active_skill = self._resolve_skill(skill)   # 不存在 -> ValueError
+auto_skills = self._auto_skills(active_skill)
+
+messages = _build_initial_messages(
+    question, history, self._system_prompt(active_skill, auto_skills)
+)
+allowed_tools = set(active_skill.tools) if active_skill and active_skill.tools else None</code></pre>
+  <p><code>_system_prompt</code> 把正文追加到 system；<code>allowed_tools</code> 为 None 表示继承全部，否则只保留 skill 声明的工具。</p>
+
+  <h3>3. 自动模式：先给目录 + load_skill</h3>
+  <pre><code>load_skill_available = bool(auto_skills) and active_skill is None
+schemas = _filter_schemas(base_schemas, allowed_tools, load_skill_available)
+
+def _filter_schemas(base, allowed, load_skill_available):
+    schemas = [s for s in base
+               if allowed is None or s["function"]["name"] in allowed]
+    if load_skill_available:
+        schemas.append(LOAD_SKILL_SCHEMA)
+    return schemas</code></pre>
+  <p>模型看到 skill 清单后，自己决定是否调用 <code>load_skill</code>；<code>load_skill</code> 不是 registry 里的普通工具，而是 loop 特殊处理。</p>
+
+  <h3>4. 加载：正文进 system，工具收窄</h3>
+  <pre><code>if call.name == LOAD_SKILL_NAME:
+    step, loaded, last_signature, repeat_count = self._run_load_skill(...)
+    steps.append(step)
+    messages.append({"role": "tool", "tool_call_id": call.id,
+                     "content": step.result_text})
+    if loaded is not None:
+        active_skill = loaded
+        allowed_tools = set(loaded.tools) if loaded.tools else None
+        load_skill_available = False
+        messages[0]["content"] = self._system_prompt(active_skill, [])</code></pre>
+  <p><strong>三个动作缺一不可：</strong>① 回填 tool 消息；② 更新 system prompt；③ 收窄后续轮次的工具集。只做 ①，模型看得到正文但权限没变；只做 ③，模型不知道为什么要换工具。</p>
+
+  <h3>5. 失败路径</h3>
+  <table>
+    <thead><tr><th>情况</th><th>行为</th></tr></thead>
+    <tbody>
+      <tr><td>SKILL.md 缺 front-matter</td><td>加载期 WARNING，跳过该 skill</td></tr>
+      <tr><td>name 重复</td><td>WARNING，跳过后一个</td></tr>
+      <tr><td>显式 skill 不存在</td><td><code>ValueError</code> → API 400 <code>skill_not_found</code></td></tr>
+      <tr><td><code>load_skill</code> 名字不存在</td><td><code>ok=False</code> 的 step，loop 继续</td></tr>
+      <tr><td>tools 里有未注册工具</td><td>不会凭空出现：<code>_filter_schemas</code> 只从已注册工具里选</td></tr>
+    </tbody>
+  </table>
+
   <h2>六、实测数据</h2>
   <table>
     <thead><tr><th>验收点</th><th>实测</th></tr></thead>
