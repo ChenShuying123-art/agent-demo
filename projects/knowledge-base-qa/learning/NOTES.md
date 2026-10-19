@@ -407,3 +407,19 @@
   - 0030 T27 SSE → 0031 T28 LangGraph → 0032 T29 双引擎对照
 - 校验：15 篇均恰好 1 个新章节，`<pre><code>` 开闭标签数量一致。
 - 建议阅读顺序：先读 0021（loop 主线），再按 T15→T19 补前置/后置；T20 之后按任务号推进。大文件只读"骨架"，helper 第二遍再看。
+
+## 概念补课（2026-10-19）：API 层完整链路与 response_model
+- 触发：用户追问两件事——① 能不能用一个完整的请求/响应例子讲清 `api/schemas.py` 的职责边界；② "用 `AgentRunOut` 再校验一次并序列化"是不是 FastAPI 自动做的。
+- 已整理为课程 **`lessons/0034-api-request-response-chain.html`**，以 `POST /api/agent/chat` 串起五站：
+  `AgentChatRequest` → `routes.agent_chat` → `AgentRunner.run` → `to_agent_run_out` → `response_model`。
+- 关键分工（课程主线）：
+  - 路由只取 `question / skill / history` 三个普通参数传给 `kbqa`，核心库不 import FastAPI / Pydantic。
+  - 转换函数负责字段对应、改名（`elapsed_ms → ms`）、`Path → str`；`response_model` 只认对外模型的形状。
+- `response_model` 自动做三件事：Pydantic 校验、过滤未声明字段、`jsonable_encoder` 序列化（`datetime` / `None` 递归处理）；不负责字段改名、结构重排、状态码与错误信封。
+- 两个容易误解的细节：
+  - Pydantic v2 的 `revalidate_instances` 默认是 `"never"`，所以传入同类型模型实例时通常直接放行，不会逐字段重跑；这一步更像兜底。
+  - 响应校验失败抛 `ResponseValidationError`，当前项目没有专门处理器，会落到兜底 `Exception` 处理器 → `500 internal_error`（不是 422）。
+- 错误链路对照：422 请求形状 / 400 业务输入（`invalid_request`、`skill_not_found`）/ 502 上游模型 / 500 响应契约。
+- 资源：`RESOURCES.md` 已有 FastAPI「响应模型」中文文档，无需新增；课程内补了 Pydantic `revalidate_instances` 英文链接。
+- 教学要点：讲分层时"一次请求的五站图"最有效；把"FastAPI 自动"与"必须手写"列成两列表格，能直接消除"框架是不是全包了"的误解。
+- 验证边界：当前沙箱没有 Python / FastAPI 运行环境，本课结论来自仓库代码与 FastAPI / Pydantic 官方文档，未做实际请求复现；已在交付说明中标注。
