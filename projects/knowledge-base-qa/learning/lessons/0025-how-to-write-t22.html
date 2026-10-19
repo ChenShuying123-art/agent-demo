@@ -62,6 +62,81 @@ Authorization: Bearer {WEB_SEARCH_API_KEY}
     <li>错误文本里也不拼 Key（异常信息通常只有 URL 与状态码）。</li>
   </ul>
 
+  <h2>附：代码全流程拆解</h2>
+  <p>T22 的流程：<strong>收敛参数 → 判断 mock/real → 发请求 → 统一字段 → 截断 → 返回 ToolResult</strong>。真实接口未定稿，所以 endpoint 与响应字段都做成可替换的。</p>
+
+  <table>
+    <thead><tr><th>阶段</th><th>代码</th><th>产出</th></tr></thead>
+    <tbody>
+      <tr><td>① 参数</td><td><code>query</code> / <code>_parse_count</code></td><td>query + count（1–5）</td></tr>
+      <tr><td>② 分支</td><td>endpoint/key 是否为空</td><td>mock 或 real</td></tr>
+      <tr><td>③ 请求</td><td><code>httpx.get(..., timeout=10)</code></td><td>JSON</td></tr>
+      <tr><td>④ 解析</td><td><code>_parse_response</code></td><td>title / url / snippet</td></tr>
+      <tr><td>⑤ 格式化</td><td><code>_format_results</code></td><td>编号文本</td></tr>
+      <tr><td>⑥ 返回</td><td><code>ToolResult</code></td><td>text + data</td></tr>
+    </tbody>
+  </table>
+
+  <h3>1. 工厂 + handler 骨架</h3>
+  <pre><code>def build_web_search_tool(settings: Settings) -&gt; Tool:
+    @tool(name="web_search", description="...", parameters={...})
+    def web_search(args: dict) -&gt; ToolResult:
+        query = str(args.get("query") or "").strip()
+        count = _parse_count(args.get("count"))
+
+        if not query:
+            return ToolResult(text="搜索词不能为空。")
+
+        endpoint = settings.web_search_endpoint.strip()
+        api_key = settings.web_search_api_key.strip()
+        if not endpoint or not api_key:
+            results = _mock_results(query, count)
+            return ToolResult(text=_format_results(results), data={...})
+        ...</code></pre>
+  <p><strong>为什么用工厂：</strong>endpoint/key 来自 Settings，不能在模块导入时写死；工厂把配置注入，测试时可以传假 endpoint。</p>
+
+  <h3>2. 真实请求：超时 + Bearer</h3>
+  <pre><code>resp = httpx.get(
+    endpoint,
+    params={"q": query, "count": count},
+    headers={"Authorization": f"Bearer {api_key}"},
+    timeout=_TIMEOUT_SECONDS,
+)
+resp.raise_for_status()
+results = _parse_response(resp.json(), count)</code></pre>
+  <p>超时固定 10 秒；外网失败统一捕获成文本，不让异常穿透到 agent loop。</p>
+
+  <h3>3. 解析：兼容三种响应形状</h3>
+  <pre><code>items = payload.get("references") or payload.get("results") or payload.get("data") or []
+for item in items[:count]:
+    results.append({
+        "title": str(item.get("title") or ""),
+        "url": str(item.get("url") or item.get("link") or ""),
+        "snippet": _clip(str(item.get("snippet") or item.get("summary") or ""), 200),
+    })</code></pre>
+  <p>换供应商时只改字段映射；工具对外的 <code>title/url/snippet</code> 结构保持不变。</p>
+
+  <h3>4. 格式化：模型能直接读</h3>
+  <pre><code>[1] 标题
+URL: https://...
+摘要: ...
+
+[2] 标题
+URL: https://...
+摘要: ...</code></pre>
+  <p>最多 5 条，每条摘要 ≤200 字；返回前再交给 agent loop 的总长度截断兜底。</p>
+
+  <h3>5. 失败路径</h3>
+  <table>
+    <thead><tr><th>情况</th><th>行为</th></tr></thead>
+    <tbody>
+      <tr><td>query 为空</td><td>"搜索词不能为空"</td></tr>
+      <tr><td>未配置 endpoint/key</td><td>mock 结果，带 <code>[mock]</code>，日志 WARNING</td></tr>
+      <tr><td>超时 / 非 2xx</td><td>"web_search 调用失败：..."，不抛异常</td></tr>
+      <tr><td>返回空列表</td><td>"web_search 未检索到结果"</td></tr>
+    </tbody>
+  </table>
+
   <h2>六、实测数据</h2>
   <table>
     <thead><tr><th>验收点</th><th>实测</th></tr></thead>

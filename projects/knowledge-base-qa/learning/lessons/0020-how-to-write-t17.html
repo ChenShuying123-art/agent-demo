@@ -126,6 +126,90 @@ except (ZoneInfoNotFoundError, ValueError):
   <pre><code>工具执行 search_knowledge_base 参数={'query': '...'} 成功=True 命中=2 结果长度=674 耗时=1359ms</code></pre>
   <p>按 §19.13，每个工具都要打：<strong>工具名、参数（截断）、成功/失败、结果长度、耗时</strong>。参数只保留前 80 字符，避免长 query 淹没日志。</p>
 
+  <h2>附：代码全流程拆解</h2>
+  <p>T17 两个工具的共同目标：<strong>把模型给的参数变成可回填的 ToolResult</strong>。区别是数据来源——日期用标准库算，知识库复用已有检索。</p>
+
+  <table>
+    <thead><tr><th>工具</th><th>输入</th><th>核心动作</th><th>输出</th></tr></thead>
+    <tbody>
+      <tr><td><code>get_datetime</code></td><td>date、timezone</td><td>解析日期 → 计算星期/相对天数</td><td>日期 / 星期 / 时刻 / 相对今天</td></tr>
+      <tr><td><code>search_knowledge_base</code></td><td>query、top_n</td><td><code>pipeline.retrieve(query, None)</code></td><td>编号片段 + 文件名/分数</td></tr>
+    </tbody>
+  </table>
+
+  <h3>1. get_datetime：先解析，再计算</h3>
+  <pre><code>raw_date = str(args.get("date") or "today").strip()
+timezone_name = str(args.get("timezone") or "").strip()
+
+now = _now(timezone_name)
+if now is None:
+    return ToolResult(text=f"无法识别的时区：{timezone_name}。请使用 IANA 时区名。")
+
+today = now.date()
+target = _parse_date(raw_date, today)
+if target is None:
+    return ToolResult(text=f"无法识别的日期：{raw_date}。请使用 today、tomorrow 或 YYYY-MM-DD。")
+
+delta_days = (target - today).days
+text = "\n".join([
+    f"日期：{target.isoformat()}",
+    f"星期：{_WEEKDAYS[target.weekday()]}",
+    f"时间：{now.strftime('%H:%M:%S')}（查询时刻）",
+    f"相对今天：{_relative_label(delta_days)}",
+])</code></pre>
+  <p><strong>为什么参数错误返回文本而不是抛异常：</strong>模型看到"无法识别的日期，请用 YYYY-MM-DD"后，下一轮可以自己改正；抛异常则会让整个 loop 进入失败分支，模型反而拿不到纠正机会。</p>
+
+  <h3>2. get_datetime：data 给前端</h3>
+  <pre><code>return ToolResult(
+    text=text,
+    data={
+        "date": target.isoformat(),
+        "weekday": _WEEKDAYS[target.weekday()],
+        "time": now.strftime("%H:%M:%S"),
+        "delta_days": delta_days,
+    },
+)</code></pre>
+  <p><code>text</code> 给模型读，<code>data</code> 给前端/日志用；两者内容同源，不会出现"文本说星期一、data 说星期二"。</p>
+
+  <h3>3. search_knowledge_base：工厂 + 复用检索</h3>
+  <pre><code>def build_kb_tool(pipeline: RAGPipeline, max_chars: int = 2000) -&gt; Tool:
+    @tool(name="search_knowledge_base", ...)
+    def search_knowledge_base(args: dict) -&gt; ToolResult:
+        query = str(args.get("query") or "").strip()
+        top_n = _parse_top_n(args.get("top_n"))
+
+        _, used = pipeline.retrieve(query, None)
+        selected = used[:top_n]</code></pre>
+  <p><strong>流程：</strong>模型给 query → 工具不自己实现召回/重排 → 直接复用 <code>pipeline.retrieve</code> → 取前 <code>top_n</code> 条。这样工具结果与固定链路看到的是同一套检索结果。</p>
+
+  <h3>4. 编号：模型引用契约</h3>
+  <pre><code>blocks = []
+for number, item in enumerate(selected, start=1):
+    chunk = item.chunk
+    snippet = chunk.text.strip()
+    if len(snippet) &gt; _SNIPPET_CHARS:
+        snippet = snippet[:_SNIPPET_CHARS] + "..."
+    blocks.append(
+        f"[{number}] {chunk.filename}#{chunk.index:04d}"
+        f"（分数={item.rerank_score:.4f}）\n{snippet}"
+    )
+
+text = _truncate("\n\n".join(blocks), max_chars)</code></pre>
+  <p>编号顺序 = <code>used</code> 顺序 = rerank 顺序，必须与 <code>format_context</code> 一致；否则模型写 <code>[2]</code> 时，指向的可能是另一段原文。</p>
+
+  <h3>5. 两条失败路径</h3>
+  <table>
+    <thead><tr><th>情况</th><th>get_datetime</th><th>search_knowledge_base</th></tr></thead>
+    <tbody>
+      <tr><td>参数为空</td><td>date 默认 today，不算错误</td><td>返回"查询内容不能为空"</td></tr>
+      <tr><td>参数非法</td><td>返回解释文本</td><td>top_n 收敛到 1–10</td></tr>
+      <tr><td>无结果</td><td>—</td><td>返回"未检索到相关资料"</td></tr>
+      <tr><td>运行时异常</td><td>原样抛出，由 T18 兜底</td><td>原样抛出，由 T18 兜底</td></tr>
+    </tbody>
+  </table>
+
+  <p><strong>衔接：</strong>T17 只负责"算/查"；工具结果如何回填、失败如何记 <code>ok=False</code>，是 T18 的循环逻辑。</p>
+
   <h2>十、实测数据</h2>
   <table>
     <thead><tr><th>验收点</th><th>实测</th></tr></thead>

@@ -170,6 +170,101 @@ registry.register(echo)          # echo 是 Tool，不是函数</code></pre>
     <div class="dcap">图 2 · T15 只负责 ① 和 ②；③④ 是 T16 / T18 的事</div>
   </div>
 
+  <h2>附：代码全流程拆解</h2>
+  <p>把 T15 当成一条流水线：<strong>定义数据结构 → 注册工具 → 生成说明书 → 交给上层调用</strong>。T15 只做到"生成说明书"，真正发请求与执行在 T16 / T18。</p>
+
+  <table>
+    <thead><tr><th>阶段</th><th>代码</th><th>产出</th></tr></thead>
+    <tbody>
+      <tr><td>① 定义结果</td><td><code>ToolResult</code></td><td><code>text</code>（给模型）+ <code>data</code>（给前端）</td></tr>
+      <tr><td>② 定义工具</td><td><code>Tool</code></td><td>name / description / parameters / handler</td></tr>
+      <tr><td>③ 注册</td><td><code>ToolRegistry.register</code></td><td>一张按插入顺序排列的 dict</td></tr>
+      <tr><td>④ 生成说明书</td><td><code>ToolRegistry.schemas</code></td><td>OpenAI tools 格式的 JSON 列表</td></tr>
+      <tr><td>⑤ 执行</td><td><code>registry.get(name).handler(args)</code></td><td><code>ToolResult</code>（T18 调用）</td></tr>
+    </tbody>
+  </table>
+
+  <h3>1. 数据结构：两份结果，各给谁看</h3>
+  <pre><code>@dataclass
+class ToolResult:
+    text: str                  # 给模型看的文本（回填前已截断）
+    data: dict | None = None   # 给前端看的结构化数据
+
+@dataclass
+class Tool:
+    name: str
+    description: str
+    parameters: dict           # 手写 JSON Schema
+    handler: Callable[[dict], ToolResult]</code></pre>
+  <p><strong>为什么是两份：</strong>模型只能消费文本，前端需要结构化字段（文件名、分数、坐标）。如果只给文本，前端就得再解析字符串；如果只给 data，模型又读不懂。</p>
+
+  <h3>2. 注册：dict + fail fast</h3>
+  <pre><code>class ToolRegistry:
+    def __init__(self) -&gt; None:
+        self._tools: dict[str, Tool] = {}
+
+    def register(self, tool: Tool) -&gt; None:
+        if tool.name in self._tools:
+            raise ValueError(f"工具名重复：{tool.name}")
+        self._tools[tool.name] = tool
+
+    def get(self, name: str) -&gt; Tool:
+        try:
+            return self._tools[name]
+        except KeyError:
+            raise KeyError(f"工具不存在：{name}") from None</code></pre>
+  <p><strong>流程：</strong><code>register</code> 只管登记；<code>get</code> 只管查找。重名不覆盖，因为覆盖会让模型调用到"看起来同名、实际不同"的实现，而且一路无错——这种 bug 最难查。</p>
+
+  <h3>3. schemas：模型看到的说明书</h3>
+  <pre><code>def schemas(self) -&gt; list[dict]:
+    return [
+        {
+            "type": "function",
+            "function": {
+                "name": t.name,
+                "description": t.description,
+                "parameters": t.parameters,
+            },
+        }
+        for t in self._tools.values()
+    ]</code></pre>
+  <p><strong>注意：</strong><code>parameters</code> 原样透传，不做裁剪、不做自动生成。这样你在代码里写的 schema 就是模型实际看到的 schema，可以逐字核对。</p>
+
+  <h3>4. 装饰器：把函数变成 Tool</h3>
+  <pre><code>def tool(name, description, parameters):
+    def decorator(handler):
+        return Tool(
+            name=name,
+            description=description,
+            parameters=parameters,
+            handler=handler,
+        )
+    return decorator</code></pre>
+  <p>执行顺序：<code>tool(...)</code> 先返回 <code>decorator</code>；Python 再把被装饰的函数传给 <code>decorator</code>；最后函数名绑定到 <code>Tool</code> 实例。所以注册时写 <code>registry.register(echo)</code>，<code>echo</code> 已经是 Tool，不是函数。</p>
+
+  <h3>5. 一次调用的完整流程</h3>
+  <ol>
+    <li>模块导入时，<code>@tool</code> 把每个 handler 变成 <code>Tool</code>；</li>
+    <li><code>main.py</code> 调 <code>registry.register(...)</code> 登记；</li>
+    <li>T18 调 <code>registry.schemas()</code>，随 messages 发给模型；</li>
+    <li>模型返回 <code>tool_call(name="get_datetime", arguments='{"date":"today"}')</code>；</li>
+    <li>T18 解析 JSON → <code>registry.get("get_datetime")</code> → <code>handler({"date": "today"})</code>；</li>
+    <li>拿到 <code>ToolResult</code>，把 <code>text</code> 作为 <code>role="tool"</code> 消息回填。</li>
+  </ol>
+
+  <h3>6. 失败路径</h3>
+  <table>
+    <thead><tr><th>情况</th><th>这一层的行为</th><th>由谁处理</th></tr></thead>
+    <tbody>
+      <tr><td>工具重名</td><td><code>ValueError</code>，启动期失败</td><td>装配方（main.py）</td></tr>
+      <tr><td>工具名不存在</td><td><code>KeyError</code></td><td>agent loop（T18）</td></tr>
+      <tr><td>handler 抛异常</td><td><strong>原样放行</strong></td><td>agent loop（T18）转成 <code>ok=False</code> 的步骤</td></tr>
+      <tr><td>参数不合法</td><td>这一层不校验</td><td>handler 自己返回解释文本</td></tr>
+    </tbody>
+  </table>
+
+  <p><strong>衔接：</strong>T15 产出"说明书 + 查找表"；T16 负责把说明书发给模型并解析 <code>tool_calls</code>；T18 才真正把 <code>handler</code> 跑起来。</p>
+
   <h2>九、实测数据</h2>
   <table>
     <thead><tr><th>验收点</th><th>实测</th></tr></thead>

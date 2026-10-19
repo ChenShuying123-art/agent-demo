@@ -106,6 +106,76 @@ app.state.agent = agent</code></pre>
   </ol>
   <p>它<strong>不</strong>决定调哪个工具、<strong>不</strong>执行工具、<strong>不</strong>写循环。判断标准：删掉 FastAPI，<code>kbqa/agent.py</code> 仍然能独立运行。</p>
 
+  <h2>附：代码全流程拆解</h2>
+  <p>T19 的职责很薄：<strong>HTTP 请求 → 校验 → 调 AgentRunner → 转成响应模型</strong>。它不写 loop，也不执行工具。</p>
+
+  <table>
+    <thead><tr><th>阶段</th><th>代码</th><th>产出</th></tr></thead>
+    <tbody>
+      <tr><td>① 接请求</td><td><code>AgentChatRequest</code></td><td>question / skill / history</td></tr>
+      <tr><td>② 调编排</td><td><code>_agent(request).run(...)</code></td><td><code>AgentRun</code>（内部 DTO）</td></tr>
+      <tr><td>③ 转响应</td><td><code>to_agent_run_out</code></td><td><code>AgentRunOut</code></td></tr>
+      <tr><td>④ 返回</td><td>FastAPI 序列化</td><td>JSON</td></tr>
+    </tbody>
+  </table>
+
+  <h3>1. 请求模型：只收该收的字段</h3>
+  <pre><code>class AgentChatRequest(BaseModel):
+    question: str = Field(..., min_length=1, max_length=2000)
+    skill: str | None = None
+    history: list[dict] = Field(default_factory=list)</code></pre>
+  <p>长度上限在入口就拦住，避免把超长文本带进 loop；<code>skill</code> 用 <code>str | None</code> 表达"自动 / 指定"。</p>
+
+  <h3>2. 路由：只做三件事</h3>
+  <pre><code>@router.post("/agent/chat", response_model=AgentRunOut)
+def agent_chat(payload: AgentChatRequest, request: Request) -&gt; AgentRunOut:
+    try:
+        run = _agent(request).run(payload.question, payload.skill, payload.history)
+    except ValueError as exc:
+        if payload.skill is not None:
+            raise ApiError(400, "skill_not_found", f"skill 不存在：{payload.skill}") from exc
+        raise
+    return to_agent_run_out(run)</code></pre>
+  <p><strong>为什么只捕获 <code>ValueError</code>：</strong>只有"指定了不存在的 skill"是用户输入错误，应该返回 400；模型调用失败、工具失败都不该在这里被吞掉。</p>
+
+  <h3>3. 响应转换：内部 DTO 与对外模型分离</h3>
+  <pre><code>class AgentStepOut(BaseModel):
+    index: int
+    tool: str
+    arguments: dict
+    result_text: str
+    ok: bool
+    elapsed_ms: int
+
+class AgentRunOut(BaseModel):
+    answer: str
+    skill: str | None
+    steps: list[AgentStepOut]
+    stop_reason: str
+    tool_calls_count: int
+    rounds: int
+    latency_ms: int</code></pre>
+  <p>内部 <code>AgentRun</code> 改字段，不会直接把接口契约带崩；转换函数是唯一的映射点。</p>
+
+  <h3>4. HTTP 语义</h3>
+  <table>
+    <thead><tr><th>情况</th><th>HTTP</th><th>响应</th></tr></thead>
+    <tbody>
+      <tr><td>正常完成</td><td>200</td><td><code>stop_reason="final_answer"</code></td></tr>
+      <tr><td>工具失败</td><td><strong>200</strong></td><td><code>steps[].ok=false</code>，loop 继续</td></tr>
+      <tr><td>达到 max_steps</td><td><strong>200</strong></td><td><code>stop_reason="max_steps"</code></td></tr>
+      <tr><td>skill 不存在</td><td>400</td><td><code>{"error":{"code":"skill_not_found"}}</code></td></tr>
+      <tr><td>模型调用失败</td><td>502 / 500</td><td>统一错误信封</td></tr>
+    </tbody>
+  </table>
+
+  <h3>5. 装配：app.state.agent</h3>
+  <pre><code>agent = create_agent_runner(settings, registry, llm, skills)
+app.state.agent = agent</code></pre>
+  <p>路由通过 <code>request.app.state.agent</code> 取编排器；测试时可以替换成假 runner，不需要启动真实模型。</p>
+
+  <p><strong>衔接：</strong>T19 把 T18 的 <code>AgentRun</code> 暴露成 HTTP；T20 才把它画到前端；T27 再补一条 SSE 路由。</p>
+
   <h2>七、实测数据</h2>
   <table>
     <thead><tr><th>验收点</th><th>实测</th></tr></thead>

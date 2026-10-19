@@ -38,6 +38,69 @@
     <li><strong>答案是否正确</strong>：最终标准。</li>
   </ul>
 
+  <h2>附：代码全流程拆解</h2>
+  <p>T21 的代码只有三段：<strong>装配 → 双跑 → 渲染报告</strong>。它不实现检索，也不实现 agent，只负责"公平地跑同一批问题"。</p>
+
+  <table>
+    <thead><tr><th>阶段</th><th>代码</th><th>产出</th></tr></thead>
+    <tbody>
+      <tr><td>① 装配</td><td><code>build_components()</code></td><td>同一个 store / llm / pipeline / agent</td></tr>
+      <tr><td>② 双跑</td><td><code>pipeline.answer(...)</code> + <code>agent.run(...)</code></td><td>每题两行结果</td></tr>
+      <tr><td>③ 收集</td><td><code>rows.append({...})</code></td><td>答案、工具、步数、耗时、引用</td></tr>
+      <tr><td>④ 渲染</td><td><code>render(rows)</code></td><td>Markdown 表格 + 自动统计</td></tr>
+    </tbody>
+  </table>
+
+  <h3>1. 装配：两条路线共用依赖</h3>
+  <pre><code>def build_components():
+    store = VectorStore.load(settings.data_dir / "index")
+    llm = get_llm(settings)
+    pipeline = RAGPipeline(settings, store, embedder, reranker, llm)
+
+    registry = ToolRegistry()
+    registry.register(get_datetime)
+    registry.register(build_kb_tool(pipeline, settings.agent_tool_result_max_chars))
+    agent = AgentRunner(settings, registry, llm)
+    return pipeline, agent</code></pre>
+  <p><strong>关键：</strong><code>pipeline</code> 与 <code>agent</code> 共用同一个 <code>store</code> 和 <code>llm</code>。否则两边的检索结果、模型配置不同，对比就没有意义。</p>
+
+  <h3>2. 双跑：同一题，两条路</h3>
+  <pre><code>for question in questions:
+    fixed = pipeline.answer(question, "strict_citation", None)
+    act = agent.run(question)
+
+    rows.append({
+        "question": question,
+        "fixed_answer": fixed.answer,
+        "fixed_citations": len(fixed.citations),
+        "fixed_latency": fixed.latency_ms,
+        "agent_answer": act.answer,
+        "agent_tools": [s.tool for s in act.steps],
+        "agent_steps": len(act.steps),
+        "agent_latency": act.latency_ms,
+    })</code></pre>
+  <p>固定链路永远走"召回 + 重排 + 生成"；Agent 可能调 0 次、1 次或多次工具。记录工具序列，才能解释答案差异。</p>
+
+  <h3>3. 渲染：表格 + 数据驱动的案例</h3>
+  <pre><code>for row in rows:
+    lines.append(f"| {row['index']} | {row['question']} | 固定链路 | 否 | — | ... |")
+    tools = ", ".join(row["agent_tools"]) or "未调用"
+    lines.append(f"| {row['index']} | {row['question']} | Agent | ... | {tools} | ... |")</code></pre>
+  <p>报告不是手写结论，而是从 <code>rows</code> 生成；"本次案例"会自动挑出 <code>get_datetime</code>、未调工具、引用越界等情况，避免只写空泛观察。</p>
+
+  <h3>4. 指标怎么读</h3>
+  <table>
+    <thead><tr><th>指标</th><th>说明</th></tr></thead>
+    <tbody>
+      <tr><td>是否调工具 / 工具序列</td><td>看"选择"；固定链路永远为否</td></tr>
+      <tr><td>步数 / 工具次数</td><td>看成本与复杂度</td></tr>
+      <tr><td>耗时</td><td>不是公平比较：轮数不同</td></tr>
+      <tr><td>引用数</td><td>固定链路有结构化 citations；Agent 需从答案 <code>[n]</code> 反推</td></tr>
+    </tbody>
+  </table>
+
+  <p><strong>衔接：</strong>T21 对比"固定链路 vs Agent"；T29 再对比"手写 loop vs LangGraph"，方法是同一套。</p>
+
   <h2>三、实测结果</h2>
   <table>
     <thead><tr><th>问题</th><th>固定链路</th><th>Agent</th></tr></thead>

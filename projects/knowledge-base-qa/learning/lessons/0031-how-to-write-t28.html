@@ -60,6 +60,104 @@ graph.add_edge("tools", "llm")</code></pre>
     from kbqa.agent_graph import GraphAgentRunner</code></pre>
   <p><code>AGENT_ENGINE=handwritten</code> 时进程内不会加载 langgraph——实测 <code>"langgraph" not in sys.modules</code>。可选依赖不能变成必需依赖。</p>
 
+  <h2>附：代码全流程拆解</h2>
+  <p>T28 的流程：<strong>工厂选引擎 → 初始化 State → graph.invoke → llm 节点 → 条件边 → tools 节点 → 回到 llm → END → 映射成 AgentRun</strong>。</p>
+
+  <table>
+    <thead><tr><th>阶段</th><th>代码</th><th>产出</th></tr></thead>
+    <tbody>
+      <tr><td>① 选引擎</td><td><code>create_agent_runner</code></td><td>AgentRunner 或 GraphAgentRunner</td></tr>
+      <tr><td>② 初始状态</td><td><code>AgentState</code></td><td>messages / steps / rounds / pending_calls</td></tr>
+      <tr><td>③ 图执行</td><td><code>graph.invoke(initial)</code></td><td>最终 state</td></tr>
+      <tr><td>④ 映射</td><td><code>AgentRun(...)</code></td><td>与手写版同契约</td></tr>
+    </tbody>
+  </table>
+
+  <h3>1. 工厂：延迟导入，按配置选</h3>
+  <pre><code>def create_agent_runner(settings, registry, llm, skills=None):
+    engine = (settings.agent_engine or "handwritten").strip().lower()
+    if engine == "handwritten":
+        return AgentRunner(settings, registry, llm, skills)
+    if engine == "langgraph":
+        from kbqa.agent_graph import GraphAgentRunner
+        return GraphAgentRunner(settings, registry, llm, skills)
+    raise ValueError(f"未知的 AGENT_ENGINE：{settings.agent_engine!r}")</code></pre>
+  <p><code>handwritten</code> 模式不会 import langgraph；可选依赖不能变成必需依赖。</p>
+
+  <h3>2. 初始状态：一张共享的 state</h3>
+  <pre><code>initial: AgentState = {
+    "messages": messages,
+    "steps": [],
+    "rounds": 0,
+    "tool_calls_count": 0,
+    "last_content": None,
+    "stop_reason": "max_steps",
+    "active_skill": active_skill,
+    "allowed_tools": allowed_tools,
+    "load_skill_available": load_skill_available,
+    "last_signature": None,
+    "repeat_count": 0,
+    "pending_calls": [],
+}
+final = graph.invoke(initial, config={"recursion_limit": max_steps * 2 + 4})</code></pre>
+  <p><code>recursion_limit</code> 是图的保险丝；<code>max_steps</code> 仍是业务上限，两者都要有。</p>
+
+  <h3>3. llm 节点：调模型，决定下一步</h3>
+  <pre><code>def llm_node(state):
+    rounds = state["rounds"] + 1
+    schemas = _filter_schemas(base_schemas, state["allowed_tools"],
+                              state["load_skill_available"])
+    result = self._llm.chat_with_tools(state["messages"], schemas)
+
+    if not result.tool_calls:
+        return {"rounds": rounds, "last_content": result.content,
+                "pending_calls": [], "stop_reason": "final_answer"}
+
+    if rounds &gt;= max_steps:
+        return {"rounds": rounds, "last_content": result.content,
+                "pending_calls": [], "stop_reason": "max_steps"}
+
+    messages = list(state["messages"]) + [_assistant_message(result)]
+    return {"rounds": rounds, "last_content": result.content,
+            "messages": messages, "pending_calls": result.tool_calls}</code></pre>
+  <p>节点返回的是<strong>状态增量</strong>，不是最终 AgentRun；图结束后再统一映射。</p>
+
+  <h3>4. 条件边：pending_calls 决定去向</h3>
+  <pre><code>def route(state):
+    return "tools" if state["pending_calls"] else "end"
+
+graph.add_conditional_edges("llm", route, {"tools": "tools", "end": END})
+graph.add_edge("tools", "llm")</code></pre>
+  <p>这条边就是 while 循环的"下一轮"；没有它，图跑完一轮就结束。</p>
+
+  <h3>5. tools 节点：与手写版共用执行逻辑</h3>
+  <pre><code>def tools_node(state):
+    for call in state["pending_calls"]:
+        if call.name == LOAD_SKILL_NAME:
+            step, loaded, ... = self._run_load_skill(...)
+            if loaded:
+                messages[0] = {"role": "system",
+                               "content": self._system_prompt(loaded, [])}
+        else:
+            step, ... = self._run_tool(...)
+        steps.append(step)
+        messages.append({"role": "tool", "tool_call_id": call.id,
+                         "content": step.result_text})
+
+    return {"messages": messages, "steps": steps, "pending_calls": []}</code></pre>
+  <p><code>_run_tool</code> 与 <code>_run_load_skill</code> 直接继承手写版，所以截断、异常、重复检测两版完全一致。</p>
+
+  <h3>6. 一次执行的完整流程</h3>
+  <ol>
+    <li><code>create_agent_runner</code> 选到 GraphAgentRunner；</li>
+    <li>构造 initial state；</li>
+    <li><code>graph.invoke</code> 进入 llm 节点；</li>
+    <li>有 tool_calls → 条件边去 tools；</li>
+    <li>tools 执行、回填、清空 pending_calls；</li>
+    <li>回到 llm；无 tool_calls 或达到上限 → END；</li>
+    <li>把最终 state 映射成 <code>AgentRun</code>。</li>
+  </ol>
+
   <h2>六、实测数据</h2>
   <table>
     <thead><tr><th>验收点</th><th>实测</th></tr></thead>

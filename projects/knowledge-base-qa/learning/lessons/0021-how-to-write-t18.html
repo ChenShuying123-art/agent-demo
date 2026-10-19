@@ -117,6 +117,102 @@ result_text = "工具参数解析失败：..."</code></pre>
   </table>
   <p>失败额外打 <code>WARNING</code>；完整堆栈只在 <code>DEBUG</code>，避免 INFO 被淹没。</p>
 
+  <h2>附：代码全流程拆解</h2>
+  <p>先看 <strong>T18 当时的核心循环</strong>。T26 的 skill、T27 的事件、T28 的工厂都是后来叠加的；第一遍只抓住下面这条主线，不要被外围代码带跑。</p>
+
+  <table>
+    <thead><tr><th>阶段</th><th>动作</th><th>结果</th></tr></thead>
+    <tbody>
+      <tr><td>① 初始化</td><td>system + user + history → messages</td><td>首轮输入</td></tr>
+      <tr><td>② 问模型</td><td><code>chat_with_tools(messages, schemas)</code></td><td><code>ChatResult</code></td></tr>
+      <tr><td>③ 判断</td><td><code>tool_calls</code> 为空？</td><td>是 → 最终答案；否 → 执行工具</td></tr>
+      <tr><td>④ 执行</td><td>for 每个 call → 解析 → registry.get → handler</td><td><code>AgentStep</code></td></tr>
+      <tr><td>⑤ 回填</td><td>每个结果 append 一条 <code>role="tool"</code></td><td>下一轮输入</td></tr>
+      <tr><td>⑥ 兜底</td><td><code>rounds &gt;= max_steps</code></td><td><code>stop_reason="max_steps"</code></td></tr>
+    </tbody>
+  </table>
+
+  <h3>1. 循环骨架：T18 的全部主线</h3>
+  <pre><code>messages = _build_initial_messages(question, history)
+schemas = self._registry.schemas()
+rounds = 0
+
+while rounds &lt; max_steps:
+    rounds += 1
+    result = self._llm.chat_with_tools(messages, schemas)
+
+    if not result.tool_calls:
+        return AgentRun(answer=result.content or "", stop_reason="final_answer", ...)
+
+    messages.append(_assistant_message(result))
+
+    for call in result.tool_calls:
+        step = self._run_tool(call, ...)
+        steps.append(step)
+        messages.append({
+            "role": "tool",
+            "tool_call_id": call.id,
+            "content": step.result_text,
+        })
+
+return AgentRun(answer=..., stop_reason="max_steps", ...)</code></pre>
+  <p><strong>两个层次：</strong>外层 <code>while</code> 决定"还要不要再问模型一轮"；内层 <code>for</code> 处理"这一轮模型一次点了几把工具"。不要把它们合并成一个循环。</p>
+
+  <h3>2. _run_tool：一次工具执行的完整流程</h3>
+  <pre><code>args, parse_error = _parse_arguments(call.arguments)
+if parse_error is not None:
+    text, ok = f"工具参数解析失败：{parse_error}", False
+else:
+    try:
+        tool = self._registry.get(call.name)
+    except KeyError:
+        text, ok = f"工具不存在：{call.name}", False
+    else:
+        try:
+            result = tool.handler(args)
+            text, ok = result.text, True
+        except Exception as exc:
+            text, ok = f"工具执行失败：{exc}", False
+
+text = _clip(text, max_chars)
+step = AgentStep(index=index, tool=call.name, arguments=args,
+                 result_text=text, ok=ok, elapsed_ms=elapsed_ms)</code></pre>
+  <p><strong>为什么所有失败都变成 step：</strong>loop 的职责是"让对话继续"，不是"让异常冒到 HTTP 层"。模型看到 <code>ok=False</code> 的结果后，可以换工具、换参数或直接说明失败。</p>
+
+  <h3>3. 三个停止条件</h3>
+  <table>
+    <thead><tr><th>条件</th><th>stop_reason</th><th>说明</th></tr></thead>
+    <tbody>
+      <tr><td><code>tool_calls</code> 为空</td><td><code>final_answer</code></td><td>模型给出最终答案</td></tr>
+      <tr><td><code>rounds &gt;= max_steps</code></td><td><code>max_steps</code></td><td>最后一轮即使还有 tool_calls 也不再执行，避免烧钱</td></tr>
+      <tr><td>模型调用抛 <code>LLMError</code></td><td>向上抛出</td><td>这是链路级失败，不能伪装成工具失败</td></tr>
+    </tbody>
+  </table>
+
+  <h3>4. 一个具体例子：问日期</h3>
+  <ol>
+    <li>messages = [system, user:"今天几号？"]；schemas 含 <code>get_datetime</code>；</li>
+    <li>第 1 轮模型返回 <code>tool_call(get_datetime, {"date":"today"})</code>；</li>
+    <li>执行 → <code>ToolResult(text="日期：2026-10-18...")</code>；</li>
+    <li>append <code>role="tool", tool_call_id=...</code>；</li>
+    <li>第 2 轮模型不再请求工具 → <code>final_answer</code>；</li>
+    <li>返回 <code>AgentRun(steps=[...], rounds=2, tool_calls_count=1)</code>。</li>
+  </ol>
+
+  <h3>5. 失败路径</h3>
+  <table>
+    <thead><tr><th>情况</th><th>结果</th></tr></thead>
+    <tbody>
+      <tr><td>arguments 不是合法 JSON</td><td><code>ok=False</code>，参数记 <code>{"_raw": ...}</code>，仍回填 tool 消息</td></tr>
+      <tr><td>工具名不存在</td><td><code>ok=False</code>，文本提示"工具不存在"</td></tr>
+      <tr><td>handler 抛异常</td><td><code>ok=False</code>，文本"工具执行失败：..."</td></tr>
+      <tr><td>连续重复调用</td><td>追加提示，让模型换策略</td></tr>
+      <tr><td>结果过长</td><td>严格截到 <code>agent_tool_result_max_chars</code></td></tr>
+    </tbody>
+  </table>
+
+  <p><strong>衔接：</strong>T18 是主线；T19 把它暴露成 HTTP；T26 在循环里加 skill 收窄；T27 在工具前后加事件；T28 把同一个循环改成图。</p>
+
   <h2>七、实测数据</h2>
   <table>
     <thead><tr><th>验收点</th><th>实测</th></tr></thead>

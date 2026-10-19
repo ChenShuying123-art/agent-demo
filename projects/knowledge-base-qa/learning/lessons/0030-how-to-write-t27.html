@@ -69,6 +69,101 @@ while (true) {
   </ul>
   <p>注意直接把对象赋给 <code>ref</code> 后，要通过 <code>agentResult.value</code>（响应式代理）修改字段；改原始对象不会触发重渲染。</p>
 
+  <h2>附：代码全流程拆解</h2>
+  <p>T27 的流程：<strong>HTTP 请求 → 后台线程跑 loop → 事件进队列 → 生成器写 SSE → 前端逐块解析 → 增量渲染</strong>。同步 loop 不改，只在外面包一层流式输出。</p>
+
+  <table>
+    <thead><tr><th>阶段</th><th>代码</th><th>产出</th></tr></thead>
+    <tbody>
+      <tr><td>① 接请求</td><td><code>agent_chat_stream</code></td><td>question / skill</td></tr>
+      <tr><td>② 后台跑</td><td><code>threading.Thread(worker)</code></td><td>事件写入 <code>queue.Queue</code></td></tr>
+      <tr><td>③ 事件</td><td><code>runner.run(on_event=events.put)</code></td><td>step_start / tool_call / tool_result</td></tr>
+      <tr><td>④ 分片</td><td>最终答案按 8 字切</td><td>token 事件</td></tr>
+      <tr><td>⑤ 输出</td><td><code>StreamingResponse(generator)</code></td><td><code>event: ... / data: ...</code></td></tr>
+      <tr><td>⑥ 前端</td><td><code>agentChatStream</code></td><td>追加 answer / steps</td></tr>
+    </tbody>
+  </table>
+
+  <h3>1. 后端：worker + queue + generator</h3>
+  <pre><code>events: queue.Queue = queue.Queue()
+
+def worker():
+    run = runner.run(payload.question, payload.skill, payload.history,
+                     on_event=events.put)
+    for offset in range(0, len(run.answer), 8):
+        events.put({"event": "token", "text": run.answer[offset:offset+8]})
+        time.sleep(0.02)
+    events.put({"event": "done", "answer": run.answer, ...})
+    events.put(None)
+
+threading.Thread(target=worker, daemon=True).start()
+
+def generator():
+    while True:
+        item = events.get()
+        if item is None:
+            break
+        yield f"event: {item['event']}\ndata: {json.dumps(item, ensure_ascii=False)}\n\n"
+
+return StreamingResponse(generator(), media_type="text/event-stream")</code></pre>
+  <p><strong>为什么用线程：</strong><code>AgentRunner.run</code> 和工具都是同步的；后台线程跑它，主线程只把队列事件写出去，改动最小。</p>
+
+  <h3>2. 事件从哪来：AgentRunner 的 on_event</h3>
+  <pre><code>while rounds &lt; max_steps:
+    rounds += 1
+    _emit(on_event, {"event": "step_start", "round": rounds})
+    result = self._llm.chat_with_tools(messages, schemas)
+
+    for call in result.tool_calls:
+        _emit(on_event, {"event": "tool_call", "index": len(steps),
+                         "tool": call.name, "arguments": call.arguments})
+        step = self._run_tool(...)
+        _emit(on_event, _step_event(step))</code></pre>
+  <p><code>_emit</code> 内部吞掉回调异常：前端断开时，不能让 agent 主循环崩掉。</p>
+
+  <h3>3. 前端：按空行切块</h3>
+  <pre><code>const reader = resp.body.getReader()
+const decoder = new TextDecoder()
+let buffer = ''
+
+while (true) {
+  const { done, value } = await reader.read()
+  if (done) break
+  buffer += decoder.decode(value, { stream: true })
+  const blocks = buffer.split('\n\n')
+  buffer = blocks.pop() ?? ''
+  for (const block of blocks) {
+    const line = block.split('\n').find(l =&gt; l.startsWith('data: '))
+    if (line) onEvent(JSON.parse(line.slice(6)))
+  }
+}</code></pre>
+  <p>两个易错点：保留最后一段不完整的 <code>buffer</code>；解码用 <code>{ stream: true }</code>，否则中文跨块会乱码。</p>
+
+  <h3>4. 增量渲染：先空结果，再按事件填</h3>
+  <pre><code>agentResult.value = { answer: '', skill: payload.skill, steps: [], ... }
+const current = agentResult.value as AgentRun
+
+await api.agentChatStream(question, skill, (ev) =&gt; {
+  if (ev.event === 'step_start') current.rounds = ev.round
+  else if (ev.event === 'tool_result') current.steps.push({ ... })
+  else if (ev.event === 'token') current.answer += ev.text
+  else if (ev.event === 'done') { current.answer = ev.answer; ... }
+})</code></pre>
+  <p>必须改 <code>agentResult.value</code>（Vue 的响应式代理），不要改赋值的原始对象；否则界面不会更新。</p>
+
+  <h3>5. 失败路径</h3>
+  <table>
+    <thead><tr><th>情况</th><th>行为</th></tr></thead>
+    <tbody>
+      <tr><td>模型/工具异常</td><td>worker 发 <code>error</code> 事件，然后结束</td></tr>
+      <tr><td>客户端断开</td><td>daemon 线程继续跑完；回调异常被 <code>_emit</code> 吞掉</td></tr>
+      <tr><td>非 2xx</td><td>前端解析错误信封，抛 <code>ApiError</code></td></tr>
+      <tr><td>中文跨块</td><td><code>TextDecoder(..., {stream:true})</code> 保证不乱码</td></tr>
+    </tbody>
+  </table>
+
+  <p><strong>边界：</strong><code>token</code> 是答案分片，不是模型原生 token 流；真正的原生流需要改 LLM 层的 <code>stream=True</code> 解析。</p>
+
   <h2>六、实测数据</h2>
   <table>
     <thead><tr><th>验收点</th><th>实测</th></tr></thead>

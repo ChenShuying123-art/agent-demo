@@ -61,6 +61,89 @@
   <h3>2. skill 下拉只有「自动」</h3>
   <p>T26 之前后端 <code>/api/agent/skills</code> 返回空数组，所以下拉只有「自动」。组件不需要特判：<code>v-for</code> 渲染空列表即可，T26 之后自然出现选项。</p>
 
+  <h2>附：代码全流程拆解</h2>
+  <p>T20 的流程是<strong>单向数据流</strong>：用户操作 → 子组件 emit → App 发请求 → 结果 props 回传 → 展示组件渲染。网络调用只发生在 App 一处。</p>
+
+  <table>
+    <thead><tr><th>阶段</th><th>代码位置</th><th>动作</th></tr></thead>
+    <tbody>
+      <tr><td>① 页面加载</td><td><code>App.vue onMounted</code></td><td><code>api.agentSkills()</code> 取 skill 列表</td></tr>
+      <tr><td>② 用户输入</td><td><code>AgentPanel</code></td><td>textarea + skill 下拉 + 流式开关</td></tr>
+      <tr><td>③ 发事件</td><td><code>emit('ask', {question, skill, stream})</code></td><td>组件不直接请求</td></tr>
+      <tr><td>④ 调接口</td><td><code>App.onAgentAsk</code></td><td><code>api.agentChat</code> 或流式方法</td></tr>
+      <tr><td>⑤ 回传 props</td><td><code>:result="agentResult"</code></td><td>答案 + 指标 + steps</td></tr>
+      <tr><td>⑥ 渲染轨迹</td><td><code>ToolTrace</code></td><td>逐条 details，失败标红</td></tr>
+    </tbody>
+  </table>
+
+  <h3>1. 类型与请求：把后端契约搬到前端</h3>
+  <pre><code>export interface AgentRun {
+  answer: string
+  skill: string | null
+  steps: AgentStep[]
+  stop_reason: string
+  tool_calls_count: number
+  rounds: number
+  latency_ms: number
+}
+
+agentChat(question: string, skill: string | null): Promise&lt;AgentRun&gt; {
+  return request&lt;AgentRun&gt;('/agent/chat', jsonBody({
+    question: question.slice(0, MAX_QUESTION_LEN),
+    skill,
+    history: [],
+  }))
+}</code></pre>
+  <p>前端的 <code>AgentRun</code> 与后端 <code>AgentRunOut</code> 字段一一对应；任何一边改字段，另一边都要同步。</p>
+
+  <h3>2. App：唯一的网络入口</h3>
+  <pre><code>function onAgentAsk(payload: { question: string; skill: string | null; stream: boolean }) {
+  void run(async () =&gt; {
+    if (!payload.stream) {
+      agentResult.value = await api.agentChat(payload.question, payload.skill)
+      return
+    }
+    // 流式：先放空结果，随后按事件增量填充
+    agentResult.value = { answer: '', skill: payload.skill, steps: [], ... }
+  })
+}</code></pre>
+  <p><code>run()</code> 统一处理 <code>busy</code> 与错误；展示组件只发事件，不关心 <code>ApiError</code> 长什么样。</p>
+
+  <h3>3. AgentPanel：props 进、emits 出</h3>
+  <pre><code>const props = defineProps&lt;{
+  busy: boolean
+  result: AgentRun | null
+  skills: SkillInfo[]
+}&gt;()
+
+const emit = defineEmits&lt;{
+  (e: 'ask', payload: { question: string; skill: string | null; stream: boolean }): void
+}&gt;()
+
+function submit() {
+  const text = question.value.trim()
+  if (!text || props.busy) return
+  emit('ask', { question: text, skill: skill.value || null, stream: stream.value })
+}</code></pre>
+  <p><strong>单向数据流：</strong>子组件不能改 <code>props.result</code>，只能 emit；这样"数据从哪来、在哪改"永远只有一条路径。</p>
+
+  <h3>4. ToolTrace：失败默认展开</h3>
+  <pre><code>&lt;details :open="!step.ok"&gt;
+  &lt;summary&gt;
+    &lt;span&gt;#{{ step.index + 1 }}&lt;/span&gt;
+    &lt;span&gt;{{ step.tool }}&lt;/span&gt;
+    &lt;span :class="['badge', step.ok ? 'ok' : 'bad']"&gt;
+      {{ step.ok ? '成功' : '失败' }}
+    &lt;/span&gt;
+    &lt;span&gt;{{ step.elapsed_ms }} ms&lt;/span&gt;
+  &lt;/summary&gt;
+  &lt;pre&gt;{{ JSON.stringify(step.arguments) }}&lt;/pre&gt;
+  &lt;pre&gt;{{ step.result_text }}&lt;/pre&gt;
+&lt;/details&gt;</code></pre>
+  <p>成功步骤折叠省空间，失败步骤默认展开并标红；颜色不是装饰，是让异常在长列表里跳出来。</p>
+
+  <p><strong>衔接：</strong>T20 只画"非流式"结果；T27 在 App 里加流式分支，复用同一套 props 与 ToolTrace。</p>
+
   <h2>五、实测数据</h2>
   <table>
     <thead><tr><th>验收点</th><th>实测</th></tr></thead>
