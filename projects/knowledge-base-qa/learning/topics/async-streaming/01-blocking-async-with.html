@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>01 · 同步、阻塞与 async with</title>
+<link rel="stylesheet" href="../../assets/style.css">
+</head>
+<body>
+<div class="wrap">
+
+  <p class="eyebrow">专题 · 01</p>
+  <h1>同步、阻塞与 <code>async with</code></h1>
+  <p class="lede">先把三个常被混用的词拆开：同步 / 异步、阻塞 / 非阻塞、上下文管理器。搞清这三个，<code>async with</code> 就只剩一层语法糖。</p>
+
+  <h2>一、两个轴，不是一件事</h2>
+  <table>
+    <thead><tr><th></th><th>同步</th><th>异步</th></tr></thead>
+    <tbody>
+      <tr><td>调用方式</td><td>直接调用，返回即结果</td><td><code>await</code> / Future / 回调</td></tr>
+      <tr><td>等待时线程</td><td>被占用，不能干别的</td><td>可以让出，去处理别的任务</td></tr>
+      <tr><td>本项目例子</td><td><code>AgentRunner.run()</code></td><td><code>stdio_client</code> / <code>ClientSession</code></td></tr>
+    </tbody>
+  </table>
+
+  <p>另一个轴是“阻塞”与“非阻塞”，说的是<strong>等待时怎么返回</strong>：</p>
+  <ul>
+    <li><strong>阻塞</strong>：等到有结果才返回（网络、磁盘、<code>time.sleep</code>、子进程）。</li>
+    <li><strong>非阻塞</strong>：立刻返回“还没好”，稍后再问。</li>
+  </ul>
+
+  <p>最常见的组合是<strong>同步 + 阻塞</strong>，本项目就是；asyncio 是<strong>异步 + 非阻塞</strong>。</p>
+
+  <div class="note">
+    <span class="label">关键区分</span>
+    阻塞 ≠ 吃满 CPU。等待网络时 CPU 占用可能是 0%，但线程仍然被占着，不能执行别的代码。
+  </div>
+
+  <h2>二、阻塞到底发生在哪一行</h2>
+  <p>沿着流式路由的调用链往下看：</p>
+  <pre><code>routes.py:243   def agent_chat_stream(...)              # 同步函数
+  └─ agent.py:61   def run(...)                          # 同步函数
+       └─ agent.py:123  self._llm.chat_with_tools(...)   # 同步函数
+            └─ llm.py:161  self._client.chat.completions.create(...)
+                 └─ OpenAI 同步 SDK
+                      └─ socket.recv(...)                # 线程停在这里</code></pre>
+
+  <p>模型一次响应可能 2~10 秒，最多 5 轮，中间还要跑工具（<code>agent.py:353</code>）。这几十秒里，调用栈上的函数帧都“挂着”，线程没有一刻能腾出来。</p>
+
+  <h2>三、<code>with</code> 到 <code>async with</code></h2>
+  <p>普通 <code>with</code> 解决的是“用完必须还”：</p>
+
+  <pre><code>with borrow_key() as key:
+    use(key)
+
+# 等价于：
+cm = borrow_key()
+key = cm.__enter__()
+try:
+    use(key)
+finally:
+    cm.__exit__(...)</code></pre>
+
+  <p>对象只要实现了 <code>__enter__</code> / <code>__exit__</code>，就能被 <code>with</code> 使用。当“借”和“还”本身需要等待 I/O 时，就换成异步版：</p>
+
+  <table>
+    <thead><tr><th>普通版</th><th>异步版</th></tr></thead>
+    <tbody>
+      <tr><td><code>with</code></td><td><code>async with</code></td></tr>
+      <tr><td><code>__enter__</code></td><td><code>async def __aenter__</code></td></tr>
+      <tr><td><code>__exit__</code></td><td><code>async def __aexit__</code></td></tr>
+    </tbody>
+  </table>
+
+  <pre><code>async with cm as x:
+    body
+
+# 等价于：
+x = await cm.__aenter__()
+try:
+    body
+finally:
+    await cm.__aexit__(exc_type, exc, tb)</code></pre>
+
+  <h3>跑一遍，看清理是否一定发生</h3>
+  <pre><code>class Lock:
+    async def __aenter__(self):
+        print("enter: open the door")
+        return "key"
+
+    async def __aexit__(self, exc_type, exc, tb):
+        print(f"exit: lock the door (reason={exc_type.__name__ if exc_type else 'normal'})")
+        return False
+
+async def main():
+    async with Lock() as key:
+        print(f"working with {key}")
+        raise RuntimeError("fell over")
+
+try:
+    asyncio.run(main())
+except RuntimeError as e:
+    print(f"outside caught: {e}")</code></pre>
+
+  <pre><code>enter: open the door
+working with key
+exit: lock the door (reason=RuntimeError)
+outside caught: fell over</code></pre>
+
+  <p>即使函数体抛异常，<code>exit</code> 仍会执行；收尾完成后，异常才继续往外抛。<code>__aexit__</code> 返回 <code>True</code> 会吞掉异常，返回 <code>False</code> 则继续抛。</p>
+
+  <h2>四、放回 <code>mcp_client.py</code></h2>
+  <pre><code>async with stdio_client(params) as (read, write):
+    async with ClientSession(read, write) as session:
+        await session.initialize()
+        result = await session.list_tools()</code></pre>
+
+  <ul>
+    <li><code>stdio_client(params)</code> 是一个<strong>异步上下文管理器工厂</strong>；真正的动作在 <code>__aenter__</code>：启动子进程、接好 stdin/stdout 管道。</li>
+    <li><code>as (read, write)</code> 解包它返回的二元组，拿到两个流对象（不是文件路径）。</li>
+    <li>退出时逆序清理：先关 <code>ClientSession</code>，再关闭管道、结束子进程。</li>
+    <li><code>return</code> 写在最内层也安全——<code>return</code> 会先触发两层 <code>__aexit__</code>。</li>
+  </ul>
+
+  <h2>五、“让出调用栈”是什么意思</h2>
+  <p>同步函数只有一条出路：<strong>return</strong>。它不能在中途说“我先歇会儿，你去干别的”。<code>await</code> 才能把当前协程挂起、把控制权还给事件循环，之后从暂停点恢复。</p>
+
+  <p>所以 <code>run()</code> 无法让出，不是写法问题，而是它内部没有任何 <code>await</code> 点：整条调用链都是同步 SDK。</p>
+
+  <h2>六、怎么快速判断</h2>
+  <ol>
+    <li>看定义：<code>def</code> 是同步，<code>async def</code> 是异步。</li>
+    <li>看内部：有没有网络、磁盘、<code>time.sleep</code>、<code>subprocess.run</code>。</li>
+    <li>看 SDK：<code>OpenAI(...)</code> 是同步客户端，<code>AsyncOpenAI(...)</code> 才是异步。</li>
+    <li>经验清单：<code>requests.get</code>、<code>openai.OpenAI</code>、<code>Path.read_text</code>、同步数据库驱动——全是阻塞的。</li>
+  </ol>
+
+  <h2>七、四个常见误解</h2>
+  <ul>
+    <li><strong>“同步 = 单线程”</strong>：不是。10 个线程各跑同步函数互不影响。</li>
+    <li><strong>“异步 = 多线程”</strong>：不是。asyncio 是单线程协作式并发，靠 <code>await</code> 主动让出。</li>
+    <li><strong>“阻塞会卡死整个程序”</strong>：只卡住那个线程；只有它跑在唯一的事件循环线程上，才等于卡死服务。</li>
+    <li><strong>“<code>asyncio.run</code> 就是异步”</strong>：对调用者仍是同步阻塞——它自己建事件循环，跑完协程才返回（<code>mcp_client.py:143</code>）。</li>
+  </ul>
+
+  <div class="foot">
+    下一篇：<a href="02-js-event-loop.html">02 浏览器事件循环 →</a> 或返回 <a href="index.html">目录</a>。
+  </div>
+
+</div>
+</body>
+</html>

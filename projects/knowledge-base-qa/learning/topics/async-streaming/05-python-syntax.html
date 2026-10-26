@@ -1,0 +1,165 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>05 · Python 语法速查（前端视角）</title>
+<link rel="stylesheet" href="../../assets/style.css">
+</head>
+<body>
+<div class="wrap">
+
+  <p class="eyebrow">专题 · 05</p>
+  <h1>Python 语法速查（前端视角）</h1>
+  <p class="lede">只收这次对话里真正卡住过的语法：缩进、dict、<code>Path</code>、生成器、线程、队列、<code>is None</code>。每条都配一个 JS 对照。</p>
+
+  <h2>一、最基础的三点</h2>
+  <ul>
+    <li><strong>缩进就是代码块</strong>，没有 <code>{}</code>，也不用分号。</li>
+    <li><strong>没有 <code>new</code></strong>：<code>queue.Queue()</code> 直接创建实例。</li>
+    <li><strong>类型注解可选</strong>：<code>def f(x: int) -&gt; str</code>，运行时不做强制检查。</li>
+  </ul>
+
+  <h2>二、数据结构</h2>
+  <table>
+    <thead><tr><th>Python</th><th>JS</th><th>说明</th></tr></thead>
+    <tbody>
+      <tr><td><code>{"a": 1, "b": 2}</code></td><td><code>{a: 1, b: 2}</code></td><td>dict，键通常是字符串</td></tr>
+      <tr><td><code>[1, 2, 3]</code></td><td><code>[1, 2, 3]</code></td><td>list</td></tr>
+      <tr><td><code>(1, 2)</code></td><td>无直接对应</td><td>tuple，不可变</td></tr>
+      <tr><td><code>None</code></td><td><code>null</code> / <code>undefined</code></td><td>空值</td></tr>
+      <tr><td><code>True</code> / <code>False</code></td><td><code>true</code> / <code>false</code></td><td>首字母大写</td></tr>
+      <tr><td><code>"a" + "b"</code></td><td><code>'a' + 'b'</code></td><td>两种引号等价</td></tr>
+      <tr><td><code>f"{name} 岁"</code></td><td><code>`${name} 岁`</code></td><td>f-string</td></tr>
+    </tbody>
+  </table>
+
+  <h2>三、函数与参数</h2>
+  <pre><code>def handler(args: dict) -&gt; ToolResult:
+    return ToolResult(text="ok")</code></pre>
+
+  <ul>
+    <li><code>def</code> 定义函数，冒号后缩进。</li>
+    <li><code>args: dict</code> 是类型注解；<code>-&gt; ToolResult</code> 是返回值注解。</li>
+    <li>关键字参数：<code>Tool(name="x", description="y")</code>，比 JS 的对象参数更原生。</li>
+    <li>默认值：<code>def f(limit: int = 50)</code>。</li>
+    <li>可变参数：<code>*args</code>（位置）、<code>**kwargs</code>（关键字）。</li>
+  </ul>
+
+  <h3>闭包工厂</h3>
+  <pre><code>def _make_handler(settings, spec, remote_name, full_name):
+    def handler(args: dict) -&gt; ToolResult:
+        ...
+    return handler</code></pre>
+  <p>必须用工厂，不能在循环里直接定义函数，否则所有闭包共享最后一个 <code>spec</code>（晚绑定）。</p>
+
+  <h3><code>getattr</code> 与 <code>or</code> 兜底</h3>
+  <pre><code>parameters = (
+    getattr(remote, "inputSchema", None)
+    or getattr(remote, "input_schema", None)
+    or {"type": "object", "properties": {}}
+)</code></pre>
+  <p><code>getattr(obj, "x", default)</code> 是“取属性，没有就返回默认值”；<code>None or y</code> 会继续用 <code>y</code>。</p>
+
+  <h2>四、<code>Path(name)</code> 是什么</h2>
+  <pre><code>from pathlib import Path
+
+p = Path("notes.md")     # 只构造对象，不读盘、不建文件
+p.name                   # 'notes.md'
+p.parts                  # ('notes.md',)
+p.is_absolute()          # False
+Path("a/b.md").name      # 'b.md'（只保留最后一段）</code></pre>
+
+  <p><code>Path</code> 是 <code>pathlib</code> 的类，<code>Path(name)</code> 是实例化。它跨平台处理分隔符和盘符；真正访问磁盘的是 <code>exists()</code> / <code>write_text()</code> / <code>mkdir()</code>。</p>
+
+  <p>在 <code>md_writer/server.py:50</code> 里，它配合 <code>is_absolute()</code>、<code>name</code>、<code>parts</code> 做“只允许纯文件名”的白名单。</p>
+
+  <h2>五、生成器与 <code>yield</code></h2>
+  <pre><code>def gen():
+    yield 1
+    yield 2
+
+g = gen()        # 不执行函数体
+next(g)          # 1
+next(g)          # 2
+next(g)          # StopIteration</code></pre>
+
+  <ul>
+    <li><code>yield</code> 交出一个值并暂停，保留局部变量和执行位置。</li>
+    <li><code>for x in gen()</code> 自动处理 <code>StopIteration</code>。</li>
+    <li>生成器<strong>只能遍历一次</strong>，不能 <code>len()</code>、不能下标。</li>
+    <li><code>(x*x for x in xs)</code> 是生成器表达式；<code>[x*x for x in xs]</code> 是列表，立即算完。</li>
+  </ul>
+
+  <h2>六、线程与队列</h2>
+  <pre><code>import queue, threading
+
+events = queue.Queue()          # FIFO、内部带锁
+
+def worker():
+    events.put({"event": "step"})
+    events.put(None)            # 结束哨兵
+
+t = threading.Thread(target=worker, daemon=True)
+t.start()                       # 立刻返回
+t.join()                        # 等它结束（可选）
+
+item = events.get()             # 空队列时阻塞</code></pre>
+
+  <ul>
+    <li><code>target=worker</code> 传函数对象，<strong>不能写 <code>worker()</code></strong>。</li>
+    <li><code>daemon=True</code>：主线程退出时不等它。</li>
+    <li>一个 Thread 对象只能 <code>start()</code> 一次。</li>
+    <li>线程里抛异常不会传到主线程，必须自己 <code>try/except</code> 并通知消费者。</li>
+  </ul>
+
+  <h2>七、<code>is None</code> 与 <code>==</code></h2>
+  <pre><code>if item is None:
+    break</code></pre>
+  <p><code>is</code> 比较“是不是同一个对象”，<code>==</code> 比较值。<code>None</code> 是单例，所以判断 None 一律写 <code>is None</code>，PEP 8 也这么要求。</p>
+
+  <h2>八、循环</h2>
+  <pre><code>for i in range(3):        # 0, 1, 2（不含 3）
+    ...
+
+while True:
+    ...
+    break</code></pre>
+  <p><code>range(3)</code> 等价 JS 的 <code>i = 0; i &lt; 3; i++</code>；<code>for x in xs</code> 等价 <code>for (const x of xs)</code>。</p>
+
+  <h2>九、对照总表</h2>
+  <table>
+    <thead><tr><th>Python</th><th>JavaScript</th></tr></thead>
+    <tbody>
+      <tr><td><code>def f():</code></td><td><code>function f() {}</code></td></tr>
+      <tr><td>缩进表示代码块</td><td><code>{}</code></td></tr>
+      <tr><td><code>{"a": 1}</code></td><td><code>{a: 1}</code></td></tr>
+      <tr><td><code>[1, 2]</code></td><td><code>[1, 2]</code></td></tr>
+      <tr><td><code>None</code> / <code>True</code> / <code>False</code></td><td><code>null</code> / <code>true</code> / <code>false</code></td></tr>
+      <tr><td><code>for i in range(3)</code></td><td><code>for (let i = 0; i &lt; 3; i++)</code></td></tr>
+      <tr><td><code>for x in xs</code></td><td><code>for (const x of xs)</code></td></tr>
+      <tr><td><code>yield x</code></td><td><code>yield x</code>（<code>function*</code>）</td></tr>
+      <tr><td><code>Thread(target=f)</code></td><td><code>new Worker(f)</code>（但共享内存）</td></tr>
+      <tr><td><code>time.sleep(0.2)</code></td><td>同步阻塞，不是 <code>await</code></td></tr>
+      <tr><td><code>is None</code></td><td><code>=== null</code>（近似；<code>is</code> 比的是身份）</td></tr>
+      <tr><td><code>self</code></td><td><code>this</code></td></tr>
+    </tbody>
+  </table>
+
+  <h2>十、语法坑清单</h2>
+  <ul>
+    <li><code>target=worker()</code>：立刻执行函数，把返回值当 target，启动时报错。</li>
+    <li>生成器第二次遍历是空的。</li>
+    <li><code>events.get()</code> 会永远阻塞；生产者必须保证 <code>put(None)</code>。</li>
+    <li><code>asyncio.run()</code> 不能嵌套在已有事件循环里。</li>
+    <li>可变默认参数（<code>def f(x=[])</code>）会被所有调用共享，是经典坑。</li>
+    <li>缩进必须一致；混用 tab 和空格会报 <code>TabError</code>。</li>
+  </ul>
+
+  <div class="foot">
+    上一篇：<a href="04-sse-eventsource.html">04 SSE 与 EventSource</a> · 下一篇：<a href="06-http-methods.html">06 HTTP 方法 →</a>
+  </div>
+
+</div>
+</body>
+</html>

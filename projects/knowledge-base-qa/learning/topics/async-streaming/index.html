@@ -1,0 +1,100 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>专题 · 异步、线程与流式输出</title>
+<link rel="stylesheet" href="../../assets/style.css">
+</head>
+<body>
+<div class="wrap">
+
+  <p class="eyebrow">专题笔记 · 2026-10-23 ~ 10-26</p>
+  <h1>异步、线程与流式输出</h1>
+  <p class="lede">从一个问题开始：「mcp_client.py 里的 <code>async with</code> 是什么？」一路追到 FastAPI 的线程 + 队列 + 生成器桥接、SSE 事件格式、浏览器事件循环和 HTTP 方法语义。</p>
+
+  <div class="win">
+    <strong>这份笔记回答什么：</strong>为什么同步阻塞的 agent 循环要另开线程？队列和生成器各自解决什么？SSE 的事件格式哪部分是标准、哪部分是项目约定？前端的 <code>async/await</code> 在事件循环里到底按什么顺序执行？
+  </div>
+
+  <h2>目录</h2>
+  <table>
+    <thead><tr><th>篇目</th><th>内容</th></tr></thead>
+    <tbody>
+      <tr>
+        <td><a href="01-blocking-async-with.html">01 同步、阻塞与 async with</a></td>
+        <td>同步/异步与阻塞/非阻塞两个轴；<code>with</code> 到 <code>async with</code> 的机制；调用栈为什么不放。</td>
+      </tr>
+      <tr>
+        <td><a href="02-js-event-loop.html">02 浏览器事件循环</a></td>
+        <td>宏任务、微任务、<code>await</code> 的恢复顺序；Promise 的三层结构；常见微任务清单。</td>
+      </tr>
+      <tr>
+        <td><a href="03-thread-queue-generator.html">03 线程 + 队列 + 生成器</a></td>
+        <td>push 到 pull 的桥接；逐行拆 <code>routes.py</code> 的流式路由；生成器和线程的语法。</td>
+      </tr>
+      <tr>
+        <td><a href="04-sse-eventsource.html">04 SSE 与 EventSource</a></td>
+        <td>SSE 帧格式、项目事件契约、<code>EventSource</code> 是什么、为什么这里不用它。</td>
+      </tr>
+      <tr>
+        <td><a href="05-python-syntax.html">05 Python 语法速查</a></td>
+        <td>前端视角：<code>Path</code>、<code>yield</code>、<code>Thread</code>、dict、关键字参数、<code>is None</code>。</td>
+      </tr>
+      <tr>
+        <td><a href="06-http-methods.html">06 HTTP 方法</a></td>
+        <td>GET / POST / PUT 的本质区别：安全、幂等、参数位置与项目里的实际用法。</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h2>五分钟速查</h2>
+  <table>
+    <thead><tr><th>问题</th><th>一句话答案</th></tr></thead>
+    <tbody>
+      <tr><td>什么是同步阻塞？</td><td>调用后必须等它返回；等待期间当前线程被占着，干不了别的。</td></tr>
+      <tr><td><code>async with</code> 是什么？</td><td><code>try/finally</code> 的异步版：进入时 <code>await __aenter__()</code>，退出时 <code>await __aexit__()</code>。</td></tr>
+      <tr><td>为什么要线程 + 队列？</td><td>同步 <code>run()</code> 没法中途让出；线程负责“同时”，队列负责“交接”。</td></tr>
+      <tr><td>生成器是什么？</td><td>能暂停、按需产出、只能遍历一次的函数；每个 <code>yield</code> 是一帧。</td></tr>
+      <tr><td>SSE 格式谁定的？</td><td>外壳（<code>event:</code> / <code>data:</code> / 空行）是 WHATWG 标准；JSON 字段是项目契约。</td></tr>
+      <tr><td><code>EventSource</code> 是什么？</td><td>浏览器自带的 SSE 客户端；只会发 GET，所以本项目改用 <code>fetch</code> + 手写解析。</td></tr>
+      <tr><td><code>await</code> 后面为什么排在 <code>setTimeout</code> 前面？</td><td>微任务队列在下一个宏任务和渲染之前被清空。</td></tr>
+      <tr><td>GET / POST / PUT？</td><td>读 / 办事 / 整体替换；POST 不幂等，GET 和 PUT 幂等。</td></tr>
+    </tbody>
+  </table>
+
+  <h2>对应源码</h2>
+  <table>
+    <thead><tr><th>位置</th><th>看什么</th></tr></thead>
+    <tbody>
+      <tr><td><code>kbqa/agent.py:61</code></td><td><code>run()</code> 是同步阻塞函数，内部是手写 agent loop。</td></tr>
+      <tr><td><code>kbqa/agent.py:398</code></td><td><code>_emit()</code>：把事件推给回调，且吞掉回调异常。</td></tr>
+      <tr><td><code>kbqa/llm.py:161</code></td><td>同步 <code>OpenAI</code> 客户端调用，阻塞点在这里。</td></tr>
+      <tr><td><code>api/routes.py:242-295</code></td><td>线程 + 队列 + 生成器的完整桥接。</td></tr>
+      <tr><td><code>kbqa/mcp_client.py:134</code></td><td><code>async with stdio_client(...)</code> 与 <code>ClientSession</code>。</td></tr>
+      <tr><td><code>web/src/api.ts:317-334</code></td><td>前端手写 SSE 解析。</td></tr>
+      <tr><td><code>web/src/App.vue:111-135</code></td><td>按事件类型增量渲染。</td></tr>
+      <tr><td><code>docs/spec-agent.md:285</code></td><td>事件类型的规格来源。</td></tr>
+    </tbody>
+  </table>
+
+  <div class="note">
+    <span class="label">验证边界</span>
+    本专题里的“实测输出”来自独立的最小复现脚本（Python 3.11 / Node v22），用于验证语言与事件循环行为；<strong>没有</strong>启动 FastAPI 服务、MCP 子进程或真实模型调用做端到端验证。源码结论来自逐行阅读。
+  </div>
+
+  <h2>和已有材料的关系</h2>
+  <p>本专题是“补基础”的横切笔记，不替代按任务编号写的课程。建议配合：</p>
+  <ul>
+    <li><a href="../../lessons/0028-how-to-write-t25.html">课程 0028 · MCP client（T25）</a>：<code>mcp_client.py</code> 的逐段拆解。</li>
+    <li><a href="../../lessons/0030-how-to-write-t27.html">课程 0030 · 流式输出（T27）</a>：线程 + 队列 + 生成器的原始讲解。</li>
+    <li><a href="../../reference/python-concepts-glossary.html">Python 概念术语表</a>：MCP、失败隔离等术语。</li>
+  </ul>
+
+  <div class="foot">
+    先读 01 和 03，能解释“为什么需要线程 + 队列”；再读 04，能解释浏览器里看到的每一帧从哪来。
+  </div>
+
+</div>
+</body>
+</html>

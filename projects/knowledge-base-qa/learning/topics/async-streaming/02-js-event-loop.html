@@ -1,0 +1,219 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>02 · 浏览器事件循环</title>
+<link rel="stylesheet" href="../../assets/style.css">
+</head>
+<body>
+<div class="wrap">
+
+  <p class="eyebrow">专题 · 02</p>
+  <h1>浏览器事件循环：<code>await</code> 到底排在谁前面</h1>
+  <p class="lede">记住三条规则，绝大多数 async/await 顺序题都能手推。下文所有输出都是在 Node v22 实际运行的结果；浏览器在任务/微任务层面的规则相同。</p>
+
+  <h2>一、三条规则</h2>
+  <ol class="steps">
+    <li><code>async</code> 函数被调用时，函数体<strong>立刻同步执行</strong>，一直跑到第一个 <code>await</code>。</li>
+    <li><code>await</code> 把函数挂起，剩下的代码登记成<strong>微任务</strong>，控制权还给事件循环。</li>
+    <li>顺序是：<strong>当前宏任务跑完 → 清空微任务队列 → 浏览器渲染 → 下一个宏任务</strong>。</li>
+  </ol>
+
+  <h2>二、例 1：同步、微任务、宏任务</h2>
+  <pre><code>console.log('1 脚本开始')
+
+setTimeout(() =&gt; console.log('6 setTimeout 0ms'), 0)
+Promise.resolve().then(() =&gt; console.log('4 Promise.then'))
+
+async function main() {
+  console.log('2 main 函数体开始（同步执行）')
+  await null
+  console.log('5 await 之后的代码（微任务）')
+}
+
+main()
+console.log('3 脚本结束')</code></pre>
+
+  <pre><code>1 脚本开始
+2 main 函数体开始（同步执行）
+3 脚本结束
+4 Promise.then
+5 await 之后的代码（微任务）
+6 setTimeout 0ms</code></pre>
+
+  <table>
+    <thead><tr><th>时刻</th><th>发生了什么</th></tr></thead>
+    <tbody>
+      <tr><td>①</td><td><code>console.log('1')</code> 直接执行。</td></tr>
+      <tr><td>②</td><td><code>setTimeout</code> 注册一个<strong>宏任务</strong>，排队不执行。</td></tr>
+      <tr><td>③</td><td><code>Promise.then</code> 注册一个<strong>微任务</strong>。</td></tr>
+      <tr><td>④</td><td><code>main()</code> 同步跑到 <code>await null</code>，打印 <code>2</code>，挂起；余下代码成为微任务。</td></tr>
+      <tr><td>⑤</td><td>回到脚本，打印 <code>3</code>。</td></tr>
+      <tr><td>⑥</td><td>脚本结束，清空微任务：先 <code>Promise.then</code>（<code>4</code>），再 <code>main</code> 的续体（<code>5</code>）。</td></tr>
+      <tr><td>⑦</td><td>取下一个宏任务 <code>setTimeout</code>（<code>6</code>）。</td></tr>
+    </tbody>
+  </table>
+
+  <p>注意：<code>await null</code> 后面是现成的值，<code>5</code> 也没有立刻打印——<strong><code>await</code> 一定会让出一次</strong>。</p>
+
+  <h2>三、例 2：<code>await fetch</code> 期间谁在干活</h2>
+  <pre><code>function fakeFetch() {
+  return new Promise((resolve) =&gt;
+    setTimeout(() =&gt; resolve({ json: () =&gt; ({ answer: 'ok' }) }), 100)
+  )
+}
+
+async function load() {
+  console.log('A load() 开始（同步）')
+  const res = await fakeFetch()
+  console.log('C await fetch 之后')
+  const data = await res.json()
+  console.log('D 解析完成', data.answer)
+}
+
+console.log('1 脚本开始')
+setTimeout(() =&gt; console.log('T 50ms 定时器（等待期间照常执行）'), 50)
+load()
+console.log('2 脚本结束')
+setTimeout(() =&gt; console.log('Z 200ms 定时器'), 200)</code></pre>
+
+  <pre><code>1 脚本开始
+A load() 开始（同步）
+2 脚本结束
+T 50ms 定时器（等待期间照常执行）
+C await fetch 之后
+D 解析完成 ok
+Z 200ms 定时器</code></pre>
+
+  <pre><code>0ms    脚本同步执行：1 → A → 注册 100ms 任务 → await 挂起 → 2
+0ms    微任务为空 → 事件循环空闲
+50ms   50ms 定时器到点 → 打印 T          ← 网络还没回来，页面/JS 照常干活
+100ms  网络回来 → resolve → await 续体作为微任务 → C
+100ms  第二个 await 的续体 → D
+200ms  200ms 定时器 → Z</code></pre>
+
+  <p>这就是 <code>await fetch</code> 不卡页面的原因：等待发生在浏览器内部，主线程在 <code>await</code> 处已经把控制权还给了事件循环。</p>
+
+  <h2>四、例 3：返回的是微任务吗？</h2>
+  <p>问题来自这段代码：</p>
+  <pre><code>return new Promise((resolve) =&gt;
+  setTimeout(() =&gt; resolve({ json: () =&gt; ({ answer: 'ok' }) }), 100)
+)</code></pre>
+
+  <p><strong>返回的是 Promise 对象，不是微任务。</strong>这里叠了三层：</p>
+
+  <table>
+    <thead><tr><th>代码</th><th>是什么</th><th>进什么队列</th></tr></thead>
+    <tbody>
+      <tr><td><code>new Promise(executor)</code></td><td>创建 Promise；<code>executor</code> 立即同步执行</td><td>不进队列</td></tr>
+      <tr><td><code>setTimeout(cb, 100)</code></td><td>注册一个定时器任务</td><td>宏任务队列</td></tr>
+      <tr><td><code>resolve(value)</code></td><td>改状态，并把登记过的反应排进队列</td><td>反应进微任务队列</td></tr>
+      <tr><td><code>await p</code> / <code>p.then(cb)</code></td><td>登记一个 reaction</td><td>兑现后进微任务队列</td></tr>
+    </tbody>
+  </table>
+
+  <pre><code>console.log('1 脚本开始')
+
+const p = new Promise((resolve) =&gt; {
+  console.log('2 executor 同步执行（此刻仍是 pending）')
+  setTimeout(() =&gt; {
+    console.log('4 定时器回调（宏任务）')
+    resolve('ok')
+    console.log('5 resolve 之后同一段同步代码继续')
+  }, 100)
+})
+
+console.log('6 new Promise 已返回:', p instanceof Promise)
+p.then((v) =&gt; console.log('7 then 回调（微任务），值 =', v))
+Promise.resolve().then(() =&gt; console.log('3 已就绪 Promise 的 then（微任务）'))
+console.log('8 脚本结束')</code></pre>
+
+  <pre><code>1 脚本开始
+2 executor 同步执行（此刻仍是 pending）
+6 new Promise 已返回: true
+8 脚本结束
+3 已就绪 Promise 的 then（微任务）
+4 定时器回调（宏任务）
+5 resolve 之后同一段同步代码继续
+7 then 回调（微任务），值 = ok</code></pre>
+
+  <ul>
+    <li><code>2</code> 在 <code>6</code> 前：<code>executor</code> 是同步执行的。</li>
+    <li><code>3</code> 在 <code>4</code> 前：已就绪 Promise 的 <code>then</code> 是微任务，先于 100ms 的宏任务。</li>
+    <li><code>5</code> 在 <code>7</code> 前：<code>resolve()</code> 只改状态并排队；当前同步代码先跑完，<code>then</code> 才在微任务阶段执行。</li>
+  </ul>
+
+  <h2>五、常见微任务清单</h2>
+  <table>
+    <thead><tr><th>来源</th><th>说明</th></tr></thead>
+    <tbody>
+      <tr><td><code>Promise.then / catch / finally</code></td><td>Promise 反应。</td></tr>
+      <tr><td><code>await</code> 之后的代码</td><td>本质也是 Promise reaction，每个 <code>await</code> 是一个边界。</td></tr>
+      <tr><td><code>queueMicrotask(fn)</code></td><td>显式排入微任务。</td></tr>
+      <tr><td><code>MutationObserver</code></td><td>DOM 变化批量回调（浏览器）。</td></tr>
+      <tr><td><code>Promise.all / race / allSettled / any</code></td><td>内部反应。</td></tr>
+      <tr><td><code>process.nextTick(fn)</code></td><td>Node 专属的独立队列，先于 Promise 微任务。</td></tr>
+    </tbody>
+  </table>
+
+  <h3>不是微任务</h3>
+  <table>
+    <thead><tr><th>API</th><th>实际类别</th></tr></thead>
+    <tbody>
+      <tr><td><code>setTimeout</code> / <code>setInterval</code></td><td>宏任务</td></tr>
+      <tr><td><code>setImmediate</code>（Node）</td><td>宏任务（check 阶段）</td></tr>
+      <tr><td><code>MessageChannel</code> / <code>postMessage</code></td><td>宏任务</td></tr>
+      <tr><td>DOM 事件、网络回调</td><td>宏任务</td></tr>
+      <tr><td><code>requestAnimationFrame</code></td><td>渲染阶段回调</td></tr>
+      <tr><td><code>ResizeObserver</code> / <code>IntersectionObserver</code></td><td>渲染步骤，不是微任务</td></tr>
+      <tr><td><code>Promise</code> 构造函数、<code>resolve()</code></td><td>不是任务，只是创建/改状态</td></tr>
+    </tbody>
+  </table>
+
+  <h2>六、顺序实测</h2>
+  <pre><code>console.log('1 script')
+setTimeout(() =&gt; console.log('5 setTimeout（宏任务）'), 0)
+Promise.resolve().then(() =&gt; console.log('2 promise.then（微任务）'))
+queueMicrotask(() =&gt; console.log('3 queueMicrotask（微任务）'))
+process.nextTick(() =&gt; console.log('0 process.nextTick'))
+
+;(async () =&gt; {
+  await null
+  console.log('4 await 续体（微任务）')
+})()</code></pre>
+
+  <pre><code>1 script
+0 process.nextTick
+2 promise.then（微任务）
+3 queueMicrotask（微任务）
+4 await 续体（微任务）
+5 setTimeout（宏任务）</code></pre>
+
+  <p>同一队列内按登记顺序 FIFO；当前宏任务结束后先清 nextTick 队列（Node），再清 Promise 微任务队列，最后才取下一个宏任务。</p>
+
+  <div class="note">
+    <span class="label">容易忽略</span>
+    微任务里还能产生微任务，事件循环会一直清到队列为空；写不好会饿死渲染和定时器。<code>queueMicrotask</code> 里抛错是全局未捕获错误，不是 Promise rejection。
+  </div>
+
+  <h2>七、和 Python 的对应</h2>
+  <table>
+    <thead><tr><th></th><th>JavaScript</th><th>Python</th></tr></thead>
+    <tbody>
+      <tr><td>事件循环</td><td>运行时自带</td><td><code>asyncio.run(...)</code> 启动</td></tr>
+      <tr><td>异步函数调用</td><td>立刻返回 Promise</td><td>立刻返回 coroutine（不执行）</td></tr>
+      <tr><td>等待点</td><td><code>await</code></td><td><code>await</code></td></tr>
+      <tr><td>同步代码的后果</td><td>卡住页面</td><td>卡住事件循环</td></tr>
+    </tbody>
+  </table>
+
+  <p>但本项目的 <code>run()</code> 内部是同步 <code>OpenAI</code> 客户端，整条链路没有 <code>await</code> 点，所以让不出去——这正是下一篇要用线程的原因。</p>
+
+  <div class="foot">
+    上一篇：<a href="01-blocking-async-with.html">01 同步与阻塞</a> · 下一篇：<a href="03-thread-queue-generator.html">03 线程 + 队列 + 生成器 →</a>
+  </div>
+
+</div>
+</body>
+</html>

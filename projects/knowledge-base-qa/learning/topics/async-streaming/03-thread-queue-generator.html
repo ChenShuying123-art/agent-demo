@@ -1,0 +1,226 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>03 · 线程 + 队列 + 生成器</title>
+<link rel="stylesheet" href="../../assets/style.css">
+</head>
+<body>
+<div class="wrap">
+
+  <p class="eyebrow">专题 · 03</p>
+  <h1>线程 + 队列 + 生成器</h1>
+  <p class="lede">一句话：<strong>线程负责“同时”，队列负责“交接”，生成器负责“一点点吐给浏览器”。</strong>这是把同步 agent 循环接到 HTTP 流式响应上的桥。</p>
+
+  <h2>一、为什么需要桥</h2>
+  <p><code>AgentRunner.run()</code> 是<strong>推模式</strong>：事件发生时调用你给的回调。</p>
+  <pre><code>while rounds &lt; max_steps:
+    result = self._llm.chat_with_tools(...)
+    for call in result.tool_calls:
+        _emit(on_event, {...})        # 推：调用回调
+        step = self._run_tool(...)</code></pre>
+
+  <p><code>StreamingResponse</code> 需要<strong>拉模式</strong>：反复问“下一块好了吗”。两种模式直接对接不了。</p>
+
+  <table>
+    <thead><tr><th>错误写法</th><th>结果</th></tr></thead>
+    <tbody>
+      <tr><td>在回调里 <code>yield</code></td><td><code>SyntaxError</code>：<code>yield</code> 只能出现在生成器函数自己的函数体里。</td></tr>
+      <tr><td>先跑完 <code>run()</code> 再逐条 <code>yield</code></td><td>功能对，但一点不流式：用户白屏等到全部结束。</td></tr>
+    </tbody>
+  </table>
+
+  <h2>二、三个零件</h2>
+  <table>
+    <thead><tr><th>零件</th><th>解决什么</th><th>代码</th></tr></thead>
+    <tbody>
+      <tr><td><code>threading.Thread</code></td><td>让 <code>run()</code> 和“往外写”同时发生</td><td><code>routes.py:282</code></td></tr>
+      <tr><td><code>queue.Queue</code></td><td>两个线程之间安全地交接数据</td><td><code>routes.py:251</code></td></tr>
+      <tr><td>生成器 <code>yield</code></td><td>给 <code>StreamingResponse</code> 提供拉模式接口</td><td><code>routes.py:284-289</code></td></tr>
+    </tbody>
+  </table>
+
+  <h2>三、时序</h2>
+  <pre><code>t=0.00  路由函数返回 StreamingResponse（worker 已在跑）
+        worker:  runner.run(...)
+                  └─ _emit(step_start) → queue.put(...)
+        generator: queue.get() 立刻拿到 → yield → 浏览器收到第一帧
+t=1.20  worker:  _emit(tool_call) → queue.put → generator 立刻 yield
+t=3.40  worker:  run() 返回，开始按 8 字发 token（每片 20ms）
+t=4.00  worker:  queue.put(done) → queue.put(None)
+t=4.00  generator: 读到 None → break → 流关闭</code></pre>
+
+  <p>等价的最小实验（worker 每 0.2 秒产生一个事件）实际输出：</p>
+  <pre><code>route returned at 0.00s
+yield {'event': 'step', 'i': 0} at 0.20s
+yield {'event': 'step', 'i': 1} at 0.40s
+yield {'event': 'step', 'i': 2} at 0.60s
+done at 0.60s</code></pre>
+
+  <p><code>route returned at 0.00s</code> 是关键：路由先返回响应头，后面的 0.6 秒才在迭代生成器时逐块写 body。</p>
+
+  <h2>四、逐行拆 <code>routes.py:242-295</code></h2>
+  <pre><code>runner = _agent(request)
+events: queue.Queue = queue.Queue()</code></pre>
+  <p>每个请求一个队列，请求之间天然隔离。</p>
+
+  <pre><code>def worker() -&gt; None:
+    try:
+        run = runner.run(..., on_event=events.put)</code></pre>
+  <p><code>events.put</code> 是方法对象，直接当回调；agent 每次 <code>_emit</code> 就是往队列塞一条消息。</p>
+
+  <pre><code>    except Exception as exc:
+        events.put({"event": "error", "message": str(exc)})
+        events.put(None)
+        return</code></pre>
+  <p>线程里的异常不会自动传到主线程。不 catch 的话 worker 悄悄死掉，生成器会永远阻塞在 <code>get()</code> 上——浏览器拿不到数据，连接挂到超时。</p>
+
+  <pre><code>    for offset in range(0, len(run.answer), 8):
+        events.put({"event": "token", "text": run.answer[offset:offset + 8]})
+        time.sleep(0.02)</code></pre>
+  <p>这是<strong>模拟</strong>逐字输出：把最终答案切成 8 字一片。模型本身仍是一次性返回，真正的原生 token 流需要改 LLM 层。</p>
+
+  <pre><code>    events.put({"event": "done", ...})
+    events.put(None)</code></pre>
+  <p><code>None</code> 是“没有更多了”的哨兵，等价前端的 <code>controller.close()</code>。</p>
+
+  <pre><code>threading.Thread(target=worker, daemon=True).start()</code></pre>
+  <p>创建线程 → 指定函数 → 启动。见下文“线程语法”。</p>
+
+  <pre><code>def generator():
+    while True:
+        item = events.get()        # 队列空则阻塞，不烧 CPU
+        if item is None:
+            break
+        yield f"event: {item['event']}\ndata: {json.dumps(item, ensure_ascii=False)}\n\n"</code></pre>
+  <p>每个 <code>yield</code> 是一帧 SSE；<code>ensure_ascii=False</code> 让中文直接输出。</p>
+
+  <pre><code>return StreamingResponse(generator(), media_type="text/event-stream",
+    headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})</code></pre>
+  <p><code>X-Accel-Buffering: no</code> 是给 Nginx 看的：别攒着，立刻转发。</p>
+
+  <h2>五、事件从哪来</h2>
+  <table>
+    <thead><tr><th>事件</th><th>位置</th><th>触发时机</th></tr></thead>
+    <tbody>
+      <tr><td><code>step_start</code></td><td><code>agent.py:119</code></td><td>每轮开头</td></tr>
+      <tr><td><code>tool_call</code></td><td><code>agent.py:150</code></td><td>模型点了工具</td></tr>
+      <tr><td><code>tool_result</code></td><td><code>agent.py:177</code> / <code>:201</code></td><td>工具执行完（<code>_step_event</code>）</td></tr>
+    </tbody>
+  </table>
+
+  <p>所有调用都经过 <code>_emit()</code>（<code>agent.py:398</code>），它内部 <code>try/except</code> 吞掉回调异常——前端断开不能让 agent 循环崩掉。</p>
+
+  <h2>六、生成器是什么</h2>
+  <p>普通函数 <code>return</code> 一次就结束；生成器 <code>yield</code> 可以很多次，每次暂停并保留执行位置和局部变量。</p>
+
+  <pre><code>def gen():
+    print("  A 进入函数体")
+    yield 1
+    print("  B 从 yield 1 恢复")
+    yield 2
+    print("  C 函数结束")
+
+print("1 调用 gen()")
+g = gen()
+print("2 拿到对象:", type(g).__name__, "| iter(g) is g -&gt;", iter(g) is g)
+print("3 第一次 next():", next(g))
+print("4 第二次 next():", next(g))
+try:
+    next(g)
+except StopIteration:
+    print("5 第三次 next() 抛 StopIteration")
+print("6 再遍历一次:", list(g))</code></pre>
+
+  <pre><code>1 调用 gen()
+2 拿到对象: generator | iter(g) is g -&gt; True
+  A 进入函数体
+3 第一次 next(): 1
+  B 从 yield 1 恢复
+4 第二次 next(): 2
+  C 函数结束
+5 第三次 next() 抛 StopIteration
+6 再遍历一次: []</code></pre>
+
+  <ul>
+    <li><strong>调用 <code>gen()</code> 不执行函数体</strong>，只创建对象。</li>
+    <li>每次 <code>next()</code> 跑到下一个 <code>yield</code> 就暂停。</li>
+    <li>暂停期间状态保留：执行到哪一行、局部变量是什么。</li>
+    <li><strong>一次性</strong>：跑完后 <code>list(g)</code> 是空的。</li>
+  </ul>
+
+  <p><code>for item in generator()</code> 等价于反复 <code>next()</code>，捕获 <code>StopIteration</code> 后结束。</p>
+
+  <h3>为什么流式要用它</h3>
+  <pre><code># 列表：先算完全部，再返回
+return [make_frame(e) for e in events]
+
+# 生成器：算一个、发一个，内存里始终只有一个
+return (make_frame(e) for e in events)</code></pre>
+
+  <p><code>StreamingResponse</code> 拿到生成器后就是一个循环：每 <code>yield</code> 一次，写一块到 HTTP 连接。</p>
+
+  <div class="note">
+    <span class="label">精确一点</span>
+    生成器是<strong>拉模式</strong>：消费者不 <code>next()</code> 它就不往下走。但这里中间垫了无界队列，worker 会一直塞，所以生产端没被消费者限速；真正被约束的只是“字节什么时候写给浏览器”。
+  </div>
+
+  <h2>七、线程语法</h2>
+  <pre><code>threading.Thread(target=worker, daemon=True).start()</code></pre>
+
+  <table>
+    <thead><tr><th>片段</th><th>含义</th></tr></thead>
+    <tbody>
+      <tr><td><code>Thread(...)</code></td><td>创建线程对象，此时还没跑</td></tr>
+      <tr><td><code>target=worker</code></td><td>线程启动后调用这个函数；<strong>不能写 <code>worker()</code></strong></td></tr>
+      <tr><td><code>daemon=True</code></td><td>守护线程：主线程退出时不等它</td></tr>
+      <tr><td><code>.start()</code></td><td>创建 OS 线程并开始执行，立刻返回</td></tr>
+    </tbody>
+  </table>
+
+  <pre><code>t = threading.Thread(target=work)
+t.start()      # 立刻返回
+t.join()       # 想等它结束才用</code></pre>
+
+  <p>实测（<code>work</code> 里 sleep 0.3 秒）：</p>
+  <pre><code>1 创建完 Thread 对象
+  worker: 开始
+2 start() 立刻返回 (0.00s)
+  worker: 结束
+3 join() 等到 worker 结束 (0.30s)</code></pre>
+
+  <p>GIL 让 Python 线程不能并行跑 CPU 密集代码，但<strong>等 I/O 时会释放 GIL</strong>；这里全是等网络，属于 I/O 密集，线程有效。</p>
+
+  <h2>八、失败路径与坑</h2>
+  <table>
+    <thead><tr><th>情况</th><th>行为 / 要做什么</th></tr></thead>
+    <tbody>
+      <tr><td>worker 漏掉 <code>put(None)</code></td><td>生成器永远阻塞在 <code>get()</code>，请求挂死。</td></tr>
+      <tr><td>worker 抛异常</td><td>必须自己 <code>try/except</code>，发 <code>error</code> 事件并补 <code>None</code>。</td></tr>
+      <tr><td>流已开始</td><td>响应头 200 已发出，不能再返回错误 JSON；错误只能作为事件。</td></tr>
+      <tr><td>客户端断开</td><td>生成器被回收，但 worker 仍会跑完，没有取消机制。</td></tr>
+      <tr><td>队列无界</td><td>事件太多会堆积；生产环境应设 <code>maxsize</code> 或改用异步队列。</td></tr>
+      <tr><td>路由写成 <code>async def</code></td><td>阻塞的 <code>events.get()</code> 会冻住整个事件循环；必须是同步 <code>def</code>（走线程池）。</td></tr>
+    </tbody>
+  </table>
+
+  <h2>九、前端那一半</h2>
+  <pre><code>const reader = resp.body.getReader()
+buffer += decoder.decode(value, { stream: true })
+const blocks = buffer.split('\n\n')
+buffer = blocks.pop() ?? ''
+for (const block of blocks) {
+  const line = block.split('\n').find(l =&gt; l.startsWith('data: '))
+  if (line) onEvent(JSON.parse(line.slice(6)))
+}</code></pre>
+
+  <p>两个易错点：保留最后一段不完整的 <code>buffer</code>；解码必须用 <code>{ stream: true }</code>，否则中文跨块会乱码。</p>
+
+  <div class="foot">
+    上一篇：<a href="02-js-event-loop.html">02 事件循环</a> · 下一篇：<a href="04-sse-eventsource.html">04 SSE 与 EventSource →</a>
+  </div>
+
+</div>
+</body>
+</html>

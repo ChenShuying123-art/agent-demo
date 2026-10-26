@@ -1,0 +1,153 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>04 · SSE 与 EventSource</title>
+<link rel="stylesheet" href="../../assets/style.css">
+</head>
+<body>
+<div class="wrap">
+
+  <p class="eyebrow">专题 · 04</p>
+  <h1>SSE 事件格式、契约与 <code>EventSource</code></h1>
+  <p class="lede">分两层看：外壳（<code>event:</code> / <code>data:</code> / 空行）是 WHATWG 标准；花括号里的 JSON 和事件名是项目自己定的契约。</p>
+
+  <h2>一、外壳：SSE 协议</h2>
+  <p>来自 WHATWG HTML Standard 的 Server-sent events 一节，媒体类型 <code>text/event-stream</code>。纯文本行协议：</p>
+
+  <pre><code>event: tool_result
+data: {"event":"tool_result","index":0,"tool":"get_datetime","ok":true}
+                                  ← 空行 = 一条事件结束
+
+event: token
+data: {"event":"token","text":"今天是 **20"}</code></pre>
+
+  <table>
+    <thead><tr><th>字段</th><th>作用</th><th>本项目</th></tr></thead>
+    <tbody>
+      <tr><td><code>data:</code></td><td>负载；多行会用 <code>\n</code> 拼接</td><td>用，一行 JSON</td></tr>
+      <tr><td><code>event:</code></td><td>事件类型名，默认 <code>message</code></td><td>用</td></tr>
+      <tr><td><code>id:</code></td><td>断线重连游标（<code>Last-Event-ID</code>）</td><td>没用</td></tr>
+      <tr><td><code>retry:</code></td><td>重连间隔毫秒</td><td>没用</td></tr>
+      <tr><td><code>: xxx</code></td><td>注释行，常做心跳</td><td>没用</td></tr>
+    </tbody>
+  </table>
+
+  <h3>规范细节</h3>
+  <ul>
+    <li>流必须是 UTF-8；行尾 <code>\r\n</code>、<code>\n</code>、<code>\r</code> 都接受。</li>
+    <li>字段名大小写敏感。</li>
+    <li><code>data:</code> 后面那个空格可有可无，标准会吃掉第一个空格。</li>
+    <li><strong>空行才触发事件</strong>；少一个空行，前端会一直等。</li>
+    <li><code>data:</code> 行内不能有裸换行；JSON 会把换行转义成 <code>\n</code> 两个字符，正好安全。</li>
+  </ul>
+
+  <p>后端就是拼字符串（<code>routes.py:289</code>）：</p>
+  <pre><code>yield f"event: {item['event']}\ndata: {json.dumps(item, ensure_ascii=False)}\n\n"</code></pre>
+
+  <h2>二、内层：项目自己的契约</h2>
+  <p>JSON 字段和事件名不是标准定的，是项目定的。链条如下：</p>
+  <ol class="steps">
+    <li><strong>规格先定事件名</strong>：<code>docs/spec-agent.md:285</code> 写明 <code>step_start / tool_call / tool_result / token / done</code>。</li>
+    <li><strong>实现补了 <code>error</code></strong>：<code>routes.py:246</code> 的 docstring 写“失败时 error”。规格里只有 5 种，这是实现阶段扩展，没回写规格。</li>
+    <li><strong>字段形状由发事件处决定</strong>：<code>agent.py:119</code>、<code>:150</code> 直接构造 dict；<code>tool_result</code> 由 <code>_step_event()</code>（<code>agent.py:408</code>）生成；<code>token</code> / <code>done</code> / <code>error</code> 在 worker 里拼（<code>routes.py:262-279</code>）。</li>
+    <li><strong>前端镜像成类型</strong>：<code>web/src/api.ts:86-108</code> 是 TS 可辨识联合；<code>App.vue:111-135</code> 按 <code>ev.event</code> 分支渲染。</li>
+  </ol>
+
+  <div class="note">
+    <span class="label">结论</span>
+    事件名来自 spec §19.10，字段来自 Python 侧 dict，两端靠人工保持一致，<strong>没有 schema 校验</strong>。改字段要同时改规格、后端、前端类型、渲染分支。
+  </div>
+
+  <h2>三、几个设计点</h2>
+
+  <h3>为什么 JSON 里又放了一遍 <code>"event"</code>？</h3>
+  <p>外层 <code>event:</code> 是 SSE 用的，内层 <code>"event"</code> 是业务用的。而这个前端<strong>只读 <code>data:</code> 那一行</strong>（<code>api.ts:331-333</code>），外层 <code>event:</code> 完全没被使用。它的价值只剩 <code>curl</code> / DevTools 里肉眼可读，以及将来换成 <code>EventSource</code> 时能用 <code>addEventListener('token', ...)</code>。代价是两个真相来源，可能漂移。</p>
+
+  <h3>为什么用 JSON 而不是纯文本？</h3>
+  <p>SSE 的 <code>data:</code> 不能有裸换行；答案里有 Markdown、可能有换行。JSON 编码把换行转义掉，前端 <code>JSON.parse</code> 一步到位。</p>
+
+  <h3><code>done</code> 为什么还带完整 <code>answer</code>？</h3>
+  <p><code>token</code> 是分片，任何一片丢失都会文字残缺。<code>done</code> 是最终对账：<code>App.vue:126</code> 直接用 <code>ev.answer</code> 覆盖。这就是“增量渲染 + 最终一致”。</p>
+
+  <h3><code>index</code> 干什么？</h3>
+  <p>一轮里模型可能同时点多个工具。<code>tool_call</code> 和 <code>tool_result</code> 都带 <code>index</code>，前端才能把结果配回对应调用（<code>AgentStep.index</code>）。</p>
+
+  <h3>为什么 <code>error</code> 是事件而不是 HTTP 4xx/5xx？</h3>
+  <p>流已经开始时响应头（200）早发出去了，状态码改不了，只能把错误塞进流里。所以前端必须在 <code>onEvent</code> 里处理 <code>error</code>（<code>App.vue:132-134</code>）。</p>
+
+  <h2>四、<code>EventSource</code> 是什么</h2>
+  <p>SSE 是协议，<code>EventSource</code> 是浏览器自带的 SSE 客户端。不用装库，<code>new EventSource(url)</code> 就能用。类比：</p>
+  <table>
+    <thead><tr><th>协议</th><th>浏览器自带客户端</th></tr></thead>
+    <tbody>
+      <tr><td>WebSocket</td><td><code>new WebSocket(url)</code></td></tr>
+      <tr><td>SSE（<code>text/event-stream</code>）</td><td><code>new EventSource(url)</code></td></tr>
+      <tr><td>HTTP</td><td><code>fetch</code> / <code>XMLHttpRequest</code></td></tr>
+    </tbody>
+  </table>
+
+  <pre><code>const es = new EventSource('/api/agent/chat/stream')
+
+es.onmessage = (e) =&gt; console.log(e.data)
+es.addEventListener('token', (e) =&gt; {
+  console.log(JSON.parse(e.data).text)
+})
+es.onerror = () =&gt; console.log('断了，浏览器会自动重连')
+// es.close()</code></pre>
+
+  <h3>它免费提供什么</h3>
+  <ul>
+    <li>解析帧：<code>event:</code> / <code>data:</code> / 空行，多行 <code>data</code> 拼接。</li>
+    <li>按类型分发：<code>event: token</code> 触发 <code>addEventListener('token', ...)</code>。</li>
+    <li>UTF-8 解码与半截块缓冲。</li>
+    <li>自动重连，间隔由服务端 <code>retry:</code> 控制。</li>
+    <li>断点续传：服务端发过 <code>id:</code> 时，重连带 <code>Last-Event-ID</code>。</li>
+  </ul>
+
+  <h2>五、为什么本项目不用它</h2>
+  <p><code>EventSource</code> 只发 <strong>GET</strong>，不能带请求体、不能加自定义请求头。而接口是：</p>
+  <pre><code>POST /api/agent/chat/stream
+Content-Type: application/json
+{"question": "...", "skill": null, "history": []}</code></pre>
+
+  <p>所以只能用 <code>fetch</code> + <code>response.body.getReader()</code>，自己读流、切 <code>\n\n</code>、<code>JSON.parse</code>（<code>api.ts:317-334</code>）。</p>
+
+  <p>把参数塞进查询串发 GET 也能绕，但：URL 有长度限制、问题内容会进访问日志、中文要编码。POST 更合理。</p>
+
+  <h3>因此手工补上的东西</h3>
+  <table>
+    <thead><tr><th><code>EventSource</code> 免费提供</th><th>本项目手写的位置</th></tr></thead>
+    <tbody>
+      <tr><td>帧解析</td><td><code>api.ts:328-333</code> 按 <code>\n\n</code> 切块</td></tr>
+      <tr><td>UTF-8 流式解码</td><td><code>api.ts:322</code> <code>TextDecoder</code> + <code>{ stream: true }</code></td></tr>
+      <tr><td>半截块缓冲</td><td><code>api.ts:329</code> <code>buffer = blocks.pop()</code></td></tr>
+      <tr><td>按类型分发</td><td><code>App.vue:111-135</code> 自己 switch</td></tr>
+      <tr><td>自动重连</td><td>没有，断了就结束</td></tr>
+      <tr><td><code>id:</code> 续传</td><td>没有，服务端也没发 <code>id:</code></td></tr>
+    </tbody>
+  </table>
+
+  <h2>六、这套格式的短板</h2>
+  <ul>
+    <li><strong>没有 <code>id:</code></strong>：断线后无法续传。</li>
+    <li><strong>没有心跳注释行（<code>: ping</code>）</strong>：长时间无事件的工具调用，可能被网关按空闲超时掐断。<code>X-Accel-Buffering: no</code> 只解决缓冲，不解决超时。</li>
+    <li><strong>没有版本号</strong>：字段改名时，旧前端会静默解析失败。</li>
+    <li><strong><code>event</code> 双重出现</strong>：两处可能不一致。</li>
+  </ul>
+
+  <h2>七、想亲眼看帧</h2>
+  <pre><code>curl -N -X POST http://127.0.0.1:8000/api/agent/chat/stream ^
+  -H "Content-Type: application/json" ^
+  -d "{\"question\":\"现在几点\",\"skill\":null,\"history\":[]}"</code></pre>
+
+  <p><code>-N</code> 关掉 curl 的缓冲。会依次看到 <code>step_start</code> → <code>tool_call</code> → <code>tool_result</code> → <code>token</code> ×N → <code>done</code>，每条之间有空行。</p>
+
+  <div class="foot">
+    上一篇：<a href="03-thread-queue-generator.html">03 线程 + 队列 + 生成器</a> · 下一篇：<a href="05-python-syntax.html">05 Python 语法速查 →</a>
+  </div>
+
+</div>
+</body>
+</html>

@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>06 · GET / POST / PUT</title>
+<link rel="stylesheet" href="../../assets/style.css">
+</head>
+<body>
+<div class="wrap">
+
+  <p class="eyebrow">专题 · 06</p>
+  <h1>GET / POST / PUT 的本质区别</h1>
+  <p class="lede">要害只有两个词：<strong>安全</strong>与<strong>幂等</strong>。其余差别（参数位置、缓存、重试）都是这两个性质的推论。</p>
+
+  <h2>一、一张表</h2>
+  <table>
+    <thead><tr><th>方法</th><th>语义</th><th>参数位置</th><th>安全</th><th>幂等</th><th>典型用途</th></tr></thead>
+    <tbody>
+      <tr><td><code>GET</code></td><td>读</td><td>URL 查询串</td><td>是</td><td>是</td><td>列表、详情、健康检查</td></tr>
+      <tr><td><code>POST</code></td><td>提交 / 触发处理</td><td>请求体</td><td>否</td><td><strong>否</strong></td><td>创建、问答、上传、执行动作</td></tr>
+      <tr><td><code>PUT</code></td><td>整体替换</td><td>请求体</td><td>否</td><td>是</td><td>按 ID 覆盖整个资源</td></tr>
+      <tr><td><code>PATCH</code></td><td>局部修改</td><td>请求体</td><td>否</td><td>通常否</td><td>改一个字段</td></tr>
+      <tr><td><code>DELETE</code></td><td>删除</td><td>URL</td><td>否</td><td>是</td><td>删资源</td></tr>
+    </tbody>
+  </table>
+
+  <h2>二、两个词</h2>
+  <ul>
+    <li><strong>安全（safe）</strong>：调用它不改服务端状态。<code>GET</code> 是，其余都不是。</li>
+    <li><strong>幂等（idempotent）</strong>：同一个请求发 1 次和发 N 次，<strong>最终状态一样</strong>。<code>GET</code> / <code>PUT</code> / <code>DELETE</code> 是，<code>POST</code> 不是。</li>
+  </ul>
+
+  <div class="note">
+    <span class="label">注意</span>
+    幂等说的是<strong>副作用相同</strong>，不是“响应完全一样”。<code>PUT</code> 第二次可能返回 <code>204</code>，但资源状态没变，仍算幂等。
+  </div>
+
+  <h2>三、三者的本质</h2>
+  <ul>
+    <li><code>GET /documents/42</code>：把 42 号文档给我。重发 10 次也不会多出一条数据。</li>
+    <li><code>POST /documents</code>：交一份新文档，<strong>ID 由服务端分配</strong>。重发 10 次可能创建 10 份——不幂等。</li>
+    <li><code>PUT /documents/42</code>：42 号文档的<strong>完整新内容</strong>就是这个，覆盖旧的。重发 10 次还是同一份内容——幂等。</li>
+  </ul>
+
+  <p>一句话：<strong><code>POST</code> 是“帮我办件事”，<code>PUT</code> 是“这个位置的内容改成这样”。</strong></p>
+
+  <h2>四、落到本项目</h2>
+  <table>
+    <thead><tr><th>路由</th><th>方法</th><th>为什么</th></tr></thead>
+    <tbody>
+      <tr><td><code>/api/documents</code></td><td>GET</td><td>纯读，列表。</td></tr>
+      <tr><td><code>/api/documents</code></td><td>POST</td><td>上传新文档，服务端生成 <code>doc_id</code>，创建语义。</td></tr>
+      <tr><td><code>/api/documents/{doc_id}</code></td><td>DELETE</td><td>删除，幂等。</td></tr>
+      <tr><td><code>/api/index</code></td><td>POST</td><td>触发向量化，是动作，不是读索引。</td></tr>
+      <tr><td><code>/api/agent/chat</code></td><td>POST</td><td>触发多轮工具调用，有副作用（花钱、写文件）。</td></tr>
+      <tr><td><code>/api/agent/chat/stream</code></td><td>POST</td><td>同上，且需要请求体。</td></tr>
+      <tr><td><code>/api/agent/skills</code></td><td>GET</td><td>纯读。</td></tr>
+      <tr><td><code>/api/health</code></td><td>GET</td><td>纯读，且会被探针高频调用。</td></tr>
+    </tbody>
+  </table>
+
+  <p>这个项目<strong>一个 PUT 都没用</strong>。如果要支持“用新内容整体替换 42 号文档”，才该是 <code>PUT /api/documents/42</code>。</p>
+
+  <h3>一个容易困惑的点</h3>
+  <p><code>POST /api/retrieve</code>、<code>POST /api/qa</code>、<code>POST /api/qa/compare</code> 明明是“查询”，为什么不用 GET？</p>
+  <p>因为参数是结构化对象（<code>question</code> + <code>doc_ids</code> + <code>use_rerank</code>），放进 URL 又长又丑，还可能超长度限制。<strong>GET 放不下参数时，用 POST 做查询是常见妥协</strong>，代价是失去缓存和“可安全重试”的语义。理论纯度让位于工程现实。</p>
+
+  <h2>五、四条实战规则</h2>
+  <ol class="steps">
+    <li>能被浏览器缓存、收藏、预取、重放的，只能是 GET。</li>
+    <li>会改数据或花钱的，不要用 GET——爬虫和预取会替你点一遍。</li>
+    <li>需要重试/重放的写操作，优先设计成 PUT（幂等）；POST 重试要自己做去重（幂等键、请求 ID）。</li>
+    <li>局部更新用 <code>PATCH</code>，不要用 PUT 硬凑；PUT 的语义是“整体替换”，少传一个字段就意味着把它清空。</li>
+  </ol>
+
+  <h2>六、常见误区</h2>
+  <ul>
+    <li><strong>“GET 只能查、POST 只能改”</strong>：这是约定，不是协议强制。但违反它会破坏缓存、重试和代理行为。</li>
+    <li><strong>“PUT 和 POST 的区别是 PUT 幂等”</strong>：对，但根因是语义不同——PUT 整体替换已知资源，POST 提交给服务端处理。</li>
+    <li><strong>“POST 创建，PUT 更新”</strong>：不完整。PUT 也可以创建（客户端指定 ID 时），POST 也可以更新（比如“给文档追加一段”这类动作）。</li>
+    <li><strong>“DELETE 不幂等”</strong>：DELETE 是幂等的——删 1 次和删 10 次，最终都是“不存在”，即使第二次返回 404。</li>
+  </ul>
+
+  <h2>七、状态码小抄</h2>
+  <table>
+    <thead><tr><th>场景</th><th>常见状态码</th></tr></thead>
+    <tbody>
+      <tr><td>GET 成功</td><td>200</td></tr>
+      <tr><td>POST 创建成功</td><td>201 + <code>Location</code></td></tr>
+      <tr><td>POST 触发动作、无返回体</td><td>200 / 202 / 204</td></tr>
+      <tr><td>PUT 覆盖成功</td><td>200（带返回体）/ 204（无返回体）</td></tr>
+      <tr><td>资源不存在</td><td>404</td></tr>
+      <tr><td>参数校验失败</td><td>422（本项目）/ 400</td></tr>
+      <tr><td>上游模型失败</td><td>502（本项目会把上游 code 透传）</td></tr>
+    </tbody>
+  </table>
+
+  <div class="foot">
+    上一篇：<a href="05-python-syntax.html">05 Python 语法速查</a> · 返回 <a href="index.html">目录</a>。
+  </div>
+
+</div>
+</body>
+</html>
